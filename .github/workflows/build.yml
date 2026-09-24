@@ -1,0 +1,39 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build FAP (Unleashed SDK)
+        id: build
+        uses: flipperdevices/flipperzero-ufbt-action@v0.1
+        with:
+          sdk-index-url: https://up.unleashedflip.com/directory.json
+          sdk-channel: release
+
+      - name: Crypto test
+        run: cc -o test/test_crypto test/test_crypto.c ym_crypto.c && ./test/test_crypto
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yokai_medal-${{ steps.build.outputs.suffix }}
+          path: ${{ steps.build.outputs.fap-artifacts }}
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.build.outputs.fap-artifacts }}
+          body: |
+            Built with Unleashed SDK: ${{ steps.build.outputs.suffix }}
+            Put `yokai_medal.fap` in `apps/NFC/` on the SD card. The firmware version must match the SDK above.

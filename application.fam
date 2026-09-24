@@ -1,0 +1,15 @@
+App(
+    appid="yokai_medal",
+    name="Yo-kai Medal Reader",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="youkai_medal_app",
+    requires=["gui", "storage", "notification"],
+    stack_size=4 * 1024,
+    fap_category="NFC",
+    fap_icon="icon.png",
+    fap_version="1.1",
+    fap_author="mar1mo-41414",
+    fap_weburl="https://github.com/mar1mo-41414/flipper-youkai-medal",
+    fap_description="Unlock and dump Yo-kai Watch 3 medals (3DS) / Yo-kai Watch 4 arks (Switch)",
+    sources=["youkai_medal.c", "ym_crypto.c"],
+)

@@ -158,8 +158,15 @@ static NfcCommand poller_callback(NfcGenericEvent event, void* context) {
     case MfUltralightPollerEventTypeAuthFailed:
         app->auth_ok = false;
         break;
-    case MfUltralightPollerEventTypeReadSuccess:
     case MfUltralightPollerEventTypeReadFailed:
+        /* 認証まで進んでいない = タグが無い (または途中で離れた)。結果を出さずに検出からやり直す */
+        if(!app->auth_tried) {
+            app->detected = false;
+            app->auth_ok = false;
+            return NfcCommandReset;
+        }
+        /* fall through */
+    case MfUltralightPollerEventTypeReadSuccess:
         mf_ultralight_copy(app->data, (const MfUltralightData*)nfc_poller_get_data(app->poller));
         view_dispatcher_send_custom_event(app->vd, EventReadDone);
         return NfcCommandStop;
@@ -401,7 +408,7 @@ static void show_about(App* app) {
         0,
         128,
         64,
-        "Yo-kai Medal Reader v1.1\n"
+        "Yo-kai Medal Reader v1.2\n"
         "Unlocks NTAG213 Yo-kai medals\n"
         "(Yo-kai Watch 3, 3DS) and\n"
         "Yo-kai arks (Yo-kai Watch 4,\n"

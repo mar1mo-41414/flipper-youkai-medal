@@ -46,3 +46,33 @@
   タグが無いと poller がすぐ `ReadFailed` を返し、それを読み取り完了として扱っていたため。
 - 対策: `ReadFailed` のうち AuthRequest まで進んでいないもの (タグが無い、または途中で離れた) は
   `NfcCommandReset` を返して検出からやり直す。認証を試した後の `ReadFailed` (パスワード違いなど) は従来どおり結果を表示。
+
+## 2026-10-06 NFC アプリの supported_cards プラグイン (yokai_medal_parser.fal) を追加
+
+- `.fap` (独立アプリ) とは別に、標準の NFC アプリの「Read」にそのまま乗る読み取り専用プラグインを追加。
+  読み取り・保存だけを行い、複製・種類変更などの編集機能は無い (引き続き `.fap` 側だけに実装)。
+  `.fap` の `application.fam` やソースは変更していない。
+- `.fal` は ufbt (SDK のみ) ではビルドできないことが判明。supported_cards プラグインは
+  `apptype=FlipperAppType.PLUGIN`, `requires=["nfc"]` で、親アプリ `nfc` の `application.fam` が
+  存在するソースツリー内でないとビルドできず、ufbt の環境には `nfc` アプリのマニフェストが無いため
+  `Missing application manifest for 'nfc'` で失敗する。
+  → `scripts/build_plugin.sh` で Unleashed ファームウェア全体 (shallow clone、約 300MB) を取得し、
+  `applications/main/nfc/plugins/supported_cards/` にこのリポジトリのプラグインを仮配置、
+  公式の `fbt` でビルドする方式にした (クリーンな clone から約 2 分)。
+- プラグイン本体は `nfc_plugin/yokai_medal_parser.c`。鍵導出は既存の `ym_crypto.c`/`.h` をそのまま使う
+  (`scripts/build_plugin.sh` がビルド時にファーム側へコピーする)。
+- NFC アプリのプラグイン ABI (`NfcSupportedCardsPlugin` 構造体、verify/read/parse のシグネチャ) は
+  Unleashed 本体 (GPL-3.0) のヘッダをそのまま複製せず、型定義だけを `nfc_plugin/nfc_supported_card_plugin_abi.h`
+  として自前で書き起こした (このリポジトリは MIT なため)。
+- 判別方法・鍵導出は `.fap` と同じ (ページ 3 で YW3/YW4 を判別、UID からパスワードを計算)。
+  `verify()` はページ 3 だけを読んで判定、`read()` は `mf_ultralight_poller_sync_read_card` に
+  パスワードを渡して全ページ読み取り。
+- CI (`build.yml`) に `build-fal` ジョブを追加。`build-fap` (既存、ufbt action) とは独立したジョブにし、
+  タグ push 時はどちらも Release に添付する。
+
+## 2026-10-06 .fal の実機確認
+
+- `yokai_medal_parser.fal` を SD の `apps_data/nfc/plugins/` に置き、標準の NFC アプリの Read で
+  UID `04 70 BC C2 DB 64 81` のアーク (はむはむ、MCN) を読み取り。
+  保存されたダンプは、以前 `.fap` で手動解除・保存したダンプ (`switch-youkaiwatch4-medal/Data/00_Unlock.nfc`)
+  と `diff` でバイト単位で完全一致 (UID・PWD・PACK・保護データの復号結果まで含む)。

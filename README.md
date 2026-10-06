@@ -10,21 +10,32 @@ Flipper Zero アプリ (Unleashed ファーム向け FAP)。保存したファ�
 | 妖怪アーク | 妖怪ウォッチ4 (Switch) |
 | 妖怪メダル | 妖怪ウォッチ3 (3DS) ※ 実物では未検証 |
 
+2 つの形で配布している。
+
+| 形式 | 中身 | 置き場所 |
+|---|---|---|
+| `yokai_medal.fap` | 読み取り・複製・種類の変更ができる独立アプリ | `apps/NFC/` |
+| `yokai_medal_parser.fal` | 読み取り専用。標準の NFC アプリの「Read」にそのまま乗る | `apps_data/nfc/plugins/` |
+
 ## できること
 
-- **読み取り**: メダル / アークをかざすと、UID からパスワードを計算してロックを解除し、全ページを保存する
-- **複製 (Clone)**: 読み取った (または保存済みの) ダンプを、新しい乱数 UID で作り直す
-- **種類の変更 (Change ID)**: 妖怪ウォッチ4 のアークを、別の種類 (別の妖怪) のアークとして作り直す
+- **読み取り**: メダル / アークをかざすと、UID からパスワードを計算してロックを解除し、全ページを保存する (両方の形式で可能)
+- **複製 (Clone)**: 読み取った (または保存済みの) ダンプを、新しい乱数 UID で作り直す (`.fap` のみ)
+- **種類の変更 (Change ID)**: 妖怪ウォッチ4 のアークを、別の種類 (別の妖怪) のアークとして作り直す (`.fap` のみ)
 
 ## インストール
 
-[Releases](https://github.com/mar1mo-41414/flipper-youkai-medal/releases) から `yokai_medal.fap` をダウンロードして、
-SD カードの `apps/NFC/` に置く。
+[Releases](https://github.com/mar1mo-41414/flipper-youkai-medal/releases) から必要なファイルをダウンロードする。
 
-FAP はファームの API バージョンに依存する。Releases のビルドに書いてある Unleashed のバージョンと、
+- `yokai_medal.fap` → SD カードの `apps/NFC/`
+- `yokai_medal_parser.fal` → SD カードの `apps_data/nfc/plugins/` (無ければ作る)
+
+どちらもファームの API バージョンに依存する。Releases のビルドに書いてある Unleashed のバージョンと、
 Flipper のファームのバージョンを合わせること。違う場合は自分でビルドする (下記)。
 
 ## 使い方
+
+### yokai_medal.fap (独立アプリ)
 
 Apps → NFC → **Yo-kai Medal Reader**
 
@@ -47,14 +58,28 @@ Apps → NFC → **Yo-kai Medal Reader**
 妖怪ウォッチ4 は同じ UID のアークを 1 回しか読み込まない (「このアークは一度しか読み取れません」)。
 使うたびに Clone で新しい UID のものを作ること。
 
+### yokai_medal_parser.fal (NFC アプリのプラグイン)
+
+Apps → NFC → **Read**。メダル / アークをかざすと、標準の NFC アプリの画面のまま UID・パスワード・
+チェックサムが表示され、通常の読み取りと同じ場所 (`SD:/nfc/`) に保存される。種類は自動判別。
+複製や種類の変更はできない (`.fap` を使う)。
+
 ## ビルド
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install ufbt
 .venv/bin/ufbt update --index-url=https://up.unleashedflip.com/directory.json   # Unleashed の SDK
+
 .venv/bin/ufbt            # -> dist/yokai_medal.fap
 .venv/bin/ufbt launch     # USB 接続した Flipper にインストールして起動
+
+scripts/build_plugin.sh   # -> dist_plugin/yokai_medal_parser.fal (下記参照)
 ```
+
+`yokai_medal_parser.fal` は `.fap` と違い、ufbt (SDK だけ) ではビルドできない。NFC アプリの
+supported_cards プラグインは、親アプリ (`nfc`) の `application.fam` があるソースツリー内でしか
+ビルドできないため、`scripts/build_plugin.sh` が Unleashed ファームウェア全体を取得して、
+公式のビルドツール (`fbt`) でビルドする (数分かかる)。
 
 仕組み (パスワードの算出、判別方法、テスト) は [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 

@@ -1,6 +1,7 @@
 start-note.md
 .venv/
 dist/
+dist_plugin/
 .vscode/
 test/test_crypto
 *.nfc

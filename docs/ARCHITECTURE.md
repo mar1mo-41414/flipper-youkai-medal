@@ -73,5 +73,18 @@ PC 上でテストできる:
 cc -o test/test_crypto test/test_crypto.c ym_crypto.c && ./test/test_crypto
 ```
 
+## NFC アプリのプラグイン版 (yokai_medal_parser.fal)
+
+`nfc_plugin/yokai_medal_parser.c` は、標準の NFC アプリに読み取り処理だけを提供する
+supported_cards プラグイン。verify/read は `ym_crypto.c` の鍵導出を `.fap` と共有している。
+
+- `verify(nfc)`: ページ 3 を読んで YW3/YW4 のタグか判定する (`.fap` の自動判別と同じロジック)
+- `read(nfc, device)`: ページ 0/1 から UID を組み立て、パスワードを計算して
+  `mf_ultralight_poller_sync_read_card()` に渡す。NFC アプリ本体が保存を行う
+- `parse(device, parsed_data)`: 保存済みのダンプから UID/PWD/チェックサムを表示用テキストにする
+
+ビルドは `.fap` と別系統 (`scripts/build_plugin.sh`)。理由は README を参照。
+複製・種類の変更はこちらには実装しない (`.fap` のみ)。
+
 テストの内容: 妖怪ウォッチ4 の実物のアーク 2 枚のダンプで PWD・復号・チェックサムを確認、
 妖怪ウォッチ3 の PWD を別実装 (Python) と比較、複製処理の出力をゲームで読み込めたファイルと比較。

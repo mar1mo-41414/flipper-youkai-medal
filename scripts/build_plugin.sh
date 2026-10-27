@@ -8,15 +8,34 @@
 #
 # usage: scripts/build_plugin.sh [出力先ディレクトリ (既定: dist_plugin)]
 #
+# 既定では「Unleashed の最新リリース」を使う。バージョンは .fap 側 (ufbt の
+# sdk-channel: release) と同じ directory.json から引くので、.fap と .fal が
+# 別バージョン向けになることがない。
+#
 # 環境変数:
-#   UNLEASHED_REF   取得する Unleashed のタグ/ブランチ (既定: unlshd-094。.fap と同じ SDK バージョンに合わせる)
-#   UNLEASHED_SRC   既にローカルにある Unleashed のソースツリーを使う場合、そのパス (省略時は shallow clone)
+#   UNLEASHED_REF         取得する Unleashed のタグ/ブランチ (省略時は最新リリースを自動で解決)
+#   UNLEASHED_SRC         既にローカルにある Unleashed のソースツリーを使う場合、そのパス (省略時は shallow clone)
+#   UNLEASHED_INDEX_URL   バージョン解決に使う directory.json の URL
+#
+# 解決したバージョンは 出力先/unleashed_ref.txt にも書き出す (CI が artifact 名に使う)。
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${1:-$REPO_ROOT/dist_plugin}"
-REF="${UNLEASHED_REF:-unlshd-094}"
+INDEX_URL="${UNLEASHED_INDEX_URL:-https://up.unleashedflip.com/directory.json}"
 PLUGIN_SUBDIR="applications/main/nfc/plugins/supported_cards"
+
+REF="${UNLEASHED_REF:-}"
+
+# 最新リリースのバージョンを directory.json から取る。release チャンネルのバージョン文字列は
+# そのままファームの git タグ名になっている (例: unlshd-094)
+resolve_latest_ref() {
+    curl -fsSL --max-time 60 "$INDEX_URL" | python3 -c '
+import json, sys
+channels = json.load(sys.stdin)["channels"]
+print(next(c for c in channels if c["id"] == "release")["versions"][0]["version"])
+'
+}
 
 workdir=""
 # UNLEASHED_SRC 指定時は workdir が空になる。[ -n "" ] の 1 が EXIT トラップの戻り値として
@@ -28,8 +47,20 @@ cleanup() {
 trap cleanup EXIT
 
 if [ -n "${UNLEASHED_SRC:-}" ]; then
+    # 手元のツリーを使う。バージョンはそのツリー自身から取る (指定された REF は使わない)
     fw="$UNLEASHED_SRC"
+    [ -n "$REF" ] || REF="$(git -C "$fw" describe --tags --always 2>/dev/null || echo local)"
 else
+    if [ -z "$REF" ]; then
+        # 取れなかったら古い値で代用せずに止める
+        echo "最新リリースのバージョンを取得中 ($INDEX_URL)..." >&2
+        REF="$(resolve_latest_ref)" || REF=""
+        [ -n "$REF" ] || {
+            echo "最新リリースのバージョンを解決できなかった。UNLEASHED_REF で指定して。" >&2
+            exit 1
+        }
+        echo "最新リリース: $REF" >&2
+    fi
     workdir="$(mktemp -d)"
     fw="$workdir/unleashed-firmware"
     echo "Unleashed ($REF) を取得中..." >&2
@@ -77,4 +108,5 @@ fal="$(ls -t "$fw"/build/f7-firmware-*/.extapps/yokai_medal_parser.fal 2>/dev/nu
 
 mkdir -p "$OUT_DIR"
 cp "$fal" "$OUT_DIR/"
-echo "-> $OUT_DIR/yokai_medal_parser.fal ($(basename "$(dirname "$(dirname "$fal")")"))" >&2
+printf '%s\n' "$REF" > "$OUT_DIR/unleashed_ref.txt"
+echo "-> $OUT_DIR/yokai_medal_parser.fal ($REF, $(basename "$(dirname "$(dirname "$fal")")"))" >&2

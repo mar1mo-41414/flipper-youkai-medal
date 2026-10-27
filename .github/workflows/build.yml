@@ -36,25 +36,29 @@ jobs:
           files: ${{ steps.build.outputs.fap-artifacts }}
           body: |
             Built with Unleashed SDK: ${{ steps.build.outputs.suffix }}
-            - `yokai_medal.fap`: standalone app (read/dump/clone/change-ID). Put it in `apps/NFC/` on the SD card.
+            - `yokai_medal.fap`: standalone app (read/dump/clone/change-ID/write-to-blank-tag). Put it in `apps/NFC/` on the SD card.
             - `yokai_medal_parser.fal`: read-only plugin for the stock NFC app (Apps → NFC → Read). Put it in `apps_data/nfc/plugins/`.
-            The firmware version must match the SDK above.
+            Both files are built against the latest Unleashed release; the firmware version must match the SDK above.
 
   build-fal:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    env:
-      UNLEASHED_REF: unlshd-094 # SDK バージョンを build-fap 側 (ufbt action) と合わせること
     steps:
       - uses: actions/checkout@v4
 
+      # バージョンは指定しない。build_plugin.sh が build-fap 側 (ufbt の sdk-channel: release)
+      # と同じ directory.json から最新リリースを解決し、使った値を unleashed_ref.txt に書く
       - name: Build FAL (NFC app plugin, via full Unleashed source + fbt)
         run: ./scripts/build_plugin.sh dist_plugin
 
+      - name: Read resolved SDK version
+        id: sdk
+        run: echo "ref=$(cat dist_plugin/unleashed_ref.txt)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/upload-artifact@v4
         with:
-          name: yokai_medal_parser-${{ env.UNLEASHED_REF }}
+          name: yokai_medal_parser-${{ steps.sdk.outputs.ref }}
           path: dist_plugin/yokai_medal_parser.fal
 
       - name: Release (FAL)

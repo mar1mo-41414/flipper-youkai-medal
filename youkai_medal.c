@@ -30,9 +30,11 @@
 /* YW4: シールの番号 = int(ID, 36) - 28652 (A315 = MCN, A330 = MD2 で確認) */
 #define YW4_ID_NUM_BASE 28652
 
-/* 書き込みはページ 3 (NDEF の CC) からユーザーメモリの末尾まで。ページ 0〜2 (UID/BCC/ロック) は
- * タグ側で固定なので触らない */
+/* 書き込むページの範囲。ページ 0〜2 (UID/BCC/ロックバイト) はタグ側で固定なので触らない。
+ * 末尾 39 は NTAG213 のユーザーメモリ末尾 = メダル / アークが使う範囲の末尾
+ * (NTAG215/216 の 40 ページ目以降は使わないので空のまま残す) */
 #define WRITE_FIRST_PAGE 3
+#define WRITE_LAST_PAGE  39
 
 typedef enum {
     ViewMenu,
@@ -106,6 +108,7 @@ typedef struct {
     NfcPoller* poller;
     NfcDevice* device;
     MfUltralightData* data; /* 現在扱っているダンプ */
+    MfUltralightData* out; /* 書き込み用に組み立てた、実タグ向けの内容 */
 
     MenuItem mode;
     ViewId current;
@@ -126,7 +129,8 @@ typedef struct {
     uint8_t wr_page; /* 失敗したページ */
     uint8_t wr_uid[YM_UID_LEN]; /* 書き込んだタグの UID */
     uint8_t wr_pack[2];
-    const char* wr_type; /* かざされたタグの種類 (静的な文字列) */
+    const char* wr_type; /* かざされたタグの種類の名前 (静的な文字列) */
+    MfUltralightType wr_tag_type;
 
     /* 解析結果 */
     bool valid; /* 復号してチェックサムが合った (= 複製の元にできる) */
@@ -371,39 +375,100 @@ static void rebuild_with_new_uid(App* app) {
 
 /* ---------- 空の NTAG への書き込み ---------- */
 
-/* app->data を「このタグに書き込む内容」に作り替える。
- * タグの UID は変えられないので、かざされたタグの UID で保護データを暗号化し直し、
- * PWD / PACK / 設定ページ (AUTH0・ACCESS) も実物と同じ形に埋める。 */
-static void prepare_write_data(App* app, const uint8_t uid[YM_UID_LEN]) {
-    rebuild_with_uid(app, uid); /* UID / BCC / 保護データ / app->pwd / app->pack */
+/* 書き込み先にできるタグ。7 バイト UID・パスワード認証・設定ページを持ち、
+ * メダル / アークが使うページ (3〜39) が収まるもの。
+ * 設定ページ・PWD・PACK の位置は種類ごとに違う (NTAG213 は 41〜44、215 は 131〜134、
+ * 216 は 227〜230) ので、ページ番号はファームの helper から取る。 */
+static bool writable_tag_type(MfUltralightType type) {
+    return type == MfUltralightTypeNTAG213 || type == MfUltralightTypeNTAG215 ||
+           type == MfUltralightTypeNTAG216;
+}
 
-    uint8_t pwd_page = mf_ultralight_get_pwd_page_num(app->data->type);
-    memcpy(app->data->page[pwd_page].data, app->pwd, 4);
-    app->data->page[pwd_page + 1].data[0] = app->pack[0];
-    app->data->page[pwd_page + 1].data[1] = app->pack[1];
-    app->data->page[pwd_page + 1].data[2] = 0; /* RFUI */
-    app->data->page[pwd_page + 1].data[3] = 0;
+/* 元ダンプから書き込むページの末尾 (ダンプが途中までしか読めていない場合はそこまで) */
+static uint8_t write_last_page(const App* app) {
+    uint8_t last = WRITE_LAST_PAGE;
+    if(app->data->pages_read && app->data->pages_read - 1 < last) {
+        last = (uint8_t)(app->data->pages_read - 1);
+    }
+    return last;
+}
 
-    /* 設定は元のダンプの値 (実物のアークは AUTH0 = 0x1C、ACCESS = 0x80 で読み出しも保護) を使うが、
-     * CFGLCK (設定ページの永久ロック) は落とす。立てると二度と書き換えられないタグになる */
-    uint16_t cfg_page = mf_ultralight_get_config_page_num(app->data->type);
-    MfUltralightConfigPages* cfg = (MfUltralightConfigPages*)&app->data->page[cfg_page];
-    if(app->data->pages_read <= cfg_page + 1 || cfg->auth0 == 0 ||
-       cfg->auth0 >= app->data->pages_total) {
-        /* 元のダンプに設定ページが無い (または値がおかしい) ときは保護データの先頭から保護する */
-        memset(&app->data->page[cfg_page], 0, sizeof(MfUltralightPage));
-        memset(&app->data->page[cfg_page + 1], 0, sizeof(MfUltralightPage));
-        cfg->auth0 = ym_data_first_page(app->game);
-        cfg->access.prot = true;
+/* 書き込む内容を app->out に組み立てる。
+ * 土台はかざされた実タグ (種類・バージョン・署名・ページ数・UID) で、そこに元ダンプの
+ * ページ 3〜39 を載せ、保護データは実タグの UID の鍵で暗号化し直す。
+ * PWD / PACK / 設定は、そのタグの種類の位置に置く。
+ * head = 実タグのページ 0〜3 (読み出し済み)。 */
+static void build_write_data(App* app, const MfUltralightData* tag, const MfUltralightPage* head) {
+    size_t uid_len = 0;
+    const uint8_t* uid = mf_ultralight_get_uid(tag, &uid_len);
+
+    mf_ultralight_copy(app->out, tag);
+    app->out->pages_read = app->out->pages_total;
+
+    /* ページ 0〜3 は実タグの今の値 (UID / BCC / 内部 / ロックバイト / CC)。書き換えられない */
+    for(uint8_t i = 0; i < 4; i++) app->out->page[i] = head[i];
+
+    uint8_t last = write_last_page(app);
+    for(uint8_t p = WRITE_FIRST_PAGE; p <= last; p++) app->out->page[p] = app->data->page[p];
+
+    /* ページ 3 (NDEF の CC) は WRITE がビット OR になるタグがあるので、
+     * 「今の値 + 元ダンプのビット」を書き込む値 = 期待値にする。
+     * こうすると OR のタグでも普通に上書きされるタグでも結果が同じになる
+     * (工場出荷の NTAG215 は CC = E1 10 3E 00 で、サイズのバイトが 0x3E のまま残る) */
+    for(uint8_t i = 0; i < 4; i++) {
+        app->out->page[WRITE_FIRST_PAGE].data[i] |= head[WRITE_FIRST_PAGE].data[i];
+    }
+
+    /* 保護データ: チェックサムを付け直して、実タグの UID の鍵で暗号化 */
+    for(int b = 0; b < YM_DATA_LEN; b += 16) {
+        uint8_t sum = 0;
+        for(int i = 0; i < 15; i++) sum += app->plain[b + i];
+        app->plain[b + 15] = sum;
+    }
+    YmKeys k;
+    ym_derive(app->game, uid, &k);
+    uint8_t enc[YM_DATA_LEN];
+    ym_aes128_ctr(k.key, k.iv, app->plain, enc, YM_DATA_LEN);
+    uint8_t first = ym_data_first_page(app->game);
+    for(int i = 0; i < YM_DATA_LEN / 4; i++) memcpy(app->out->page[first + i].data, &enc[i * 4], 4);
+
+    memcpy(app->pwd, k.pwd, 4);
+    app->pack[0] = YM_PACK_0;
+    app->pack[1] = YM_PACK_1;
+
+    /* PWD / PACK */
+    uint8_t pwd_page = mf_ultralight_get_pwd_page_num(app->out->type);
+    memcpy(app->out->page[pwd_page].data, app->pwd, 4);
+    app->out->page[pwd_page + 1].data[0] = app->pack[0];
+    app->out->page[pwd_page + 1].data[1] = app->pack[1];
+    app->out->page[pwd_page + 1].data[2] = 0; /* RFUI */
+    app->out->page[pwd_page + 1].data[3] = 0;
+
+    /* 設定: 元ダンプの AUTH0 / ACCESS を引き継ぐ (実物のアークは AUTH0 = 0x1C、
+     * ACCESS = 0x80 で読み出しも保護)。元ダンプに設定が無ければ保護データの先頭から保護する。
+     * CFGLCK (設定ページの永久ロック) は必ず落とす。立てると二度と書き換えられないタグになる */
+    uint16_t cfg_page = mf_ultralight_get_config_page_num(app->out->type);
+    memset(&app->out->page[cfg_page], 0, sizeof(MfUltralightPage));
+    memset(&app->out->page[cfg_page + 1], 0, sizeof(MfUltralightPage));
+    MfUltralightConfigPages* cfg = (MfUltralightConfigPages*)&app->out->page[cfg_page];
+    cfg->auth0 = ym_data_first_page(app->game);
+    cfg->access.prot = true;
+
+    MfUltralightConfigPages* src = NULL;
+    uint16_t src_cfg_page = mf_ultralight_get_config_page_num(app->data->type);
+    if(src_cfg_page && app->data->pages_read > src_cfg_page + 1 &&
+       mf_ultralight_get_config_page(app->data, &src) && src->auth0 &&
+       src->auth0 < app->out->pages_total) {
+        cfg->mirror = src->mirror;
+        cfg->mirror_page = src->mirror_page;
+        cfg->auth0 = src->auth0;
+        cfg->access = src->access;
     }
     cfg->access.cfglck = false;
-    cfg->rfui1 = 0;
-    cfg->rfui2[0] = 0;
-    cfg->rfui2[1] = 0;
 }
 
 static bool write_one_page(App* app, MfUltralightPoller* poller, uint8_t page) {
-    if(mf_ultralight_poller_write_page(poller, page, &app->data->page[page]) ==
+    if(mf_ultralight_poller_write_page(poller, page, &app->out->page[page]) ==
        MfUltralightErrorNone) {
         return true;
     }
@@ -417,9 +482,10 @@ static bool write_one_page(App* app, MfUltralightPoller* poller, uint8_t page) {
 static void write_to_tag(App* app, MfUltralightPoller* poller) {
     const MfUltralightData* tag = (const MfUltralightData*)nfc_poller_get_data(app->poller);
     app->wr_type = mf_ultralight_get_device_name(tag, NfcDeviceNameTypeShort);
+    app->wr_tag_type = tag->type;
 
-    /* 1. 種類と UID。ページ構成が変わると設定ページの位置も変わるので、同じ種類のタグだけ扱う */
-    if(tag->type != app->data->type) {
+    /* 1. 種類と UID */
+    if(!writable_tag_type(tag->type)) {
         app->wr_status = WriteBadType;
         return;
     }
@@ -433,23 +499,21 @@ static void write_to_tag(App* app, MfUltralightPoller* poller) {
 
     uint16_t cfg_page = mf_ultralight_get_config_page_num(tag->type);
     uint8_t pwd_page = mf_ultralight_get_pwd_page_num(tag->type);
-    if(cfg_page <= WRITE_FIRST_PAGE + 1 || pwd_page == 0) {
-        app->wr_status = WriteBadType;
-        return;
-    }
-    uint8_t lock_page = cfg_page - 1; /* 動的ロックバイト */
-    uint8_t last_page = lock_page - 1; /* ユーザーメモリの末尾 (NTAG213 なら 39) */
+    uint8_t lock_page = (uint8_t)(cfg_page - 1); /* 動的ロックバイト */
+    uint8_t last_page = write_last_page(app);
 
-    /* 2. ページ 0〜3 を読んで静的ロックバイト (ページ 2 の 3・4 バイト目) を確認する */
-    MfUltralightPageReadCommandData rd;
-    if(mf_ultralight_poller_read_page(poller, 0, &rd) != MfUltralightErrorNone) {
+    /* 2. ページ 0〜3 を読む。静的ロックバイト (ページ 2 の 3・4 バイト目) を確認し、
+     *    ページ 0〜3 の今の値は書き込む内容の土台にする */
+    MfUltralightPageReadCommandData head;
+    if(mf_ultralight_poller_read_page(poller, 0, &head) != MfUltralightErrorNone) {
         app->wr_status = WriteNoTag;
         return;
     }
-    if(rd.page[2].data[2] || rd.page[2].data[3]) {
+    if(head.page[2].data[2] || head.page[2].data[3]) {
         app->wr_status = WriteLocked;
         return;
     }
+    MfUltralightPageReadCommandData rd;
 
     /* 3. 設定ページを読む。読めない (読み出しも保護されている) か、既に保護範囲が書き込む
      *    ページまで来ているなら、この UID から計算した PWD で解除を試す
@@ -480,8 +544,8 @@ static void write_to_tag(App* app, MfUltralightPoller* poller) {
         return;
     }
 
-    /* 4. このタグの UID で中身を作り直す */
-    prepare_write_data(app, uid);
+    /* 4. このタグ向けの中身を作る (UID で再暗号化、設定はこのタグの位置に) */
+    build_write_data(app, tag, head.page);
 
     /* 5. 書き込む。AUTH0 (設定ページ 1) を最後にするのが肝心で、先に書くと
      *    それ以降のページが保護されて PWD も設定も書けなくなる */
@@ -516,7 +580,7 @@ static void write_to_tag(App* app, MfUltralightPoller* poller) {
             return;
         }
         for(uint8_t i = 0; i < 4 && p + i <= last_page; i++) {
-            if(memcmp(rd.page[i].data, app->data->page[p + i].data, 4) != 0) {
+            if(memcmp(rd.page[i].data, app->out->page[p + i].data, 4) != 0) {
                 app->wr_status = WriteVerifyFailed;
                 app->wr_page = p + i;
                 return;
@@ -525,13 +589,15 @@ static void write_to_tag(App* app, MfUltralightPoller* poller) {
     }
     /* 設定ページも確認する (PWD / PACK は読んでも 0 が返るので見ない) */
     if(mf_ultralight_poller_read_page(poller, lock_page, &rd) != MfUltralightErrorNone ||
-       memcmp(rd.page[1].data, app->data->page[cfg_page].data, 4) != 0 ||
-       rd.page[2].data[0] != app->data->page[cfg_page + 1].data[0]) {
+       memcmp(rd.page[1].data, app->out->page[cfg_page].data, 4) != 0 ||
+       rd.page[2].data[0] != app->out->page[cfg_page + 1].data[0]) {
         app->wr_status = WriteVerifyFailed;
-        app->wr_page = cfg_page;
+        app->wr_page = (uint8_t)cfg_page;
         return;
     }
 
+    /* 書いたタグの内容を、表示・保存用のダンプとして引き継ぐ */
+    mf_ultralight_copy(app->data, app->out);
     app->wr_status = WriteOk;
 }
 
@@ -628,8 +694,7 @@ static void show_write_result(App* app) {
     case WriteBadType:
         furi_string_cat_printf(
             s,
-            "Wrong tag type\nNeed: %s\nGot: %s",
-            mf_ultralight_get_device_name(app->data, NfcDeviceNameTypeShort),
+            "Wrong tag type\nNeed: NTAG213/215/216\nGot: %s",
             app->wr_type ? app->wr_type : "?");
         break;
     case WriteBadUid:
@@ -660,7 +725,8 @@ static void show_write_result(App* app) {
     }
 
     if(app->wr_status != WriteNoTag && app->wr_status != WriteBadType) {
-        furi_string_cat_printf(s, "\n%s\nUID: ", game_name(app->game));
+        furi_string_cat_printf(
+            s, "\n%s %s\nUID: ", app->wr_type ? app->wr_type : "?", game_name(app->game));
         append_hex(s, app->wr_uid, YM_UID_LEN);
         if(ok) {
             furi_string_cat_str(s, "\nPWD: ");
@@ -670,6 +736,11 @@ static void show_write_result(App* app) {
                 char id[4];
                 yw4_id(app, id);
                 furi_string_cat_printf(s, "\nNo.%.4s  ID %s", (const char*)app->plain, id);
+            }
+            /* 実物のメダル / アークは NTAG213。他の種類でもタグとしては成立するが、
+               ゲームが受け付けるかは未確認 */
+            if(app->wr_tag_type != MfUltralightTypeNTAG213) {
+                furi_string_cat_str(s, "\n! not NTAG213:\n  untested with the game");
             }
         }
     }
@@ -914,6 +985,7 @@ static App* app_alloc(void) {
     app->nfc = nfc_alloc();
     app->device = nfc_device_alloc();
     app->data = mf_ultralight_alloc();
+    app->out = mf_ultralight_alloc();
     app->notif = furi_record_open(RECORD_NOTIFICATION);
     app->dialogs = furi_record_open(RECORD_DIALOGS);
 
@@ -961,6 +1033,7 @@ static void app_free(App* app) {
     furi_record_close(RECORD_DIALOGS);
     furi_record_close(RECORD_NOTIFICATION);
     mf_ultralight_free(app->data);
+    mf_ultralight_free(app->out);
     nfc_device_free(app->device);
     nfc_free(app->nfc);
     furi_string_free(app->path);

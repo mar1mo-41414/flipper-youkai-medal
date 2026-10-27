@@ -19,7 +19,12 @@ REF="${UNLEASHED_REF:-unlshd-094}"
 PLUGIN_SUBDIR="applications/main/nfc/plugins/supported_cards"
 
 workdir=""
-cleanup() { [ -n "$workdir" ] && rm -rf "$workdir"; }
+# UNLEASHED_SRC 指定時は workdir が空になる。[ -n "" ] の 1 が EXIT トラップの戻り値として
+# スクリプトの終了コードになってしまうので、必ず 0 を返す
+cleanup() {
+    [ -n "$workdir" ] && rm -rf "$workdir"
+    return 0
+}
 trap cleanup EXIT
 
 if [ -n "${UNLEASHED_SRC:-}" ]; then

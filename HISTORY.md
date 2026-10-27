@@ -118,3 +118,9 @@
 - 094 では fbt の出力先ディレクトリが `build/f7-firmware-D/` → `build/f7-firmware-DC/` に変わって
   いて、`scripts/build_plugin.sh` が `.fal` のコピーに失敗していた (ビルド自体は成功していた)。
   決め打ちをやめて `build/f7-firmware-*/.extapps/` から探すようにした。
+- 同じスクリプトで、`UNLEASHED_SRC` を指定すると成功しても終了コードが 1 になっていたのを修正。
+  EXIT トラップの `cleanup()` が `[ -n "$workdir" ] && rm -rf ...` で終わっており、
+  `UNLEASHED_SRC` 指定時は `workdir` が空 = `[ -n "" ]` の 1 がそのまま
+  スクリプトの終了コードになっていた (`return 0` を追加)。
+  CI は `UNLEASHED_SRC` を使わないので影響は無かった。
+- ビルド確認: `unlshd-094` のフルソースから `.fal` を生成できた (API 88.19、APPCHK 通過、7,256 bytes)。

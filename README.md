@@ -14,7 +14,7 @@ Flipper Zero アプリ (Unleashed ファーム向け FAP)。保存したファ�
 
 | 形式 | 中身 | 置き場所 |
 |---|---|---|
-| `yokai_medal.fap` | 読み取り・複製・種類の変更ができる独立アプリ | `apps/NFC/` |
+| `yokai_medal.fap` | 読み取り・複製・種類の変更・空タグへの書き込みができる独立アプリ | `apps/NFC/` |
 | `yokai_medal_parser.fal` | 読み取り専用。標準の NFC アプリの「Read」にそのまま乗る | `apps_data/nfc/plugins/` |
 
 ## できること
@@ -22,6 +22,7 @@ Flipper Zero アプリ (Unleashed ファーム向け FAP)。保存したファ�
 - **読み取り**: メダル / アークをかざすと、UID からパスワードを計算してロックを解除し、全ページを保存する (両方の形式で可能)
 - **複製 (Clone)**: 読み取った (または保存済みの) ダンプを、新しい乱数 UID で作り直す (`.fap` のみ)
 - **種類の変更 (Change ID)**: 妖怪ウォッチ4 のアークを、別の種類 (別の妖怪) のアークとして作り直す (`.fap` のみ)
+- **書き込み (Write)**: 保存した `.nfc` を空の NTAG213 に書き込んで、実物として使えるメダル / アークにする (`.fap` のみ)
 
 ## インストール
 
@@ -44,6 +45,7 @@ Apps → NFC → **Yo-kai Medal Reader**
 | Read (auto detect) | メダル / アークを読む (種類は自動判別) |
 | Read YW3 medal (3DS) / Read YW4 ark (Switch) | 種類を固定して読む |
 | Load .nfc file | 保存済みのダンプを開く |
+| Write .nfc to blank NTAG | 保存済みのダンプを空の NTAG213 に書き込む |
 | About | 説明 |
 
 読み取りに成功すると、UID・パスワード・復号したデータのチェックサムが表示され、
@@ -54,9 +56,41 @@ Apps → NFC → **Yo-kai Medal Reader**
 - **Clone (new random UID)**: 中身はそのままで、UID だけ新しくする
 - **Change ID + new UID** (妖怪ウォッチ4 のみ): 3 文字の ID (例 `M88` = ジバニャン) を入力して、その種類のアークを作る。
   ID の一覧は [switch-youkaiwatch4-medal の docs/YOKAI_IDS.md](https://github.com/mar1mo-41414/switch-youkaiwatch4-medal/blob/main/docs/YOKAI_IDS.md)
+- **Write to blank NTAG**: 今表示している中身を、かざした空の NTAG213 に書き込む
 
 妖怪ウォッチ4 は同じ UID のアークを 1 回しか読み込まない (「このアークは一度しか読み取れません」)。
-使うたびに Clone で新しい UID のものを作ること。
+使うたびに Clone で新しい UID のものを作る (または別のタグに書き込む) こと。
+
+### 空の NTAG213 への書き込み
+
+**Write .nfc to blank NTAG** でダンプを選ぶか、結果画面の **Edit → Write to blank NTAG** を選び、
+空の NTAG213 をかざす。
+
+タグの UID は書き換えられないので、**かざしたタグの UID で鍵とパスワードを計算し直してから**書き込む
+(選んだ `.nfc` の UID は使われない)。つまり、1 枚の `.nfc` から何枚でも作れて、どれも別の UID になる
+(= 妖怪ウォッチ4 で何度でも読み込める)。
+
+書き込む内容と順番:
+
+| ページ | 内容 |
+|---|---|
+| 3〜39 | NDEF の CC・URL と、そのタグの UID で暗号化し直した保護データ |
+| 43 / 44 | PWD (UID から算出) / PACK (`BE EF`) |
+| 42 | ACCESS (読み出しも保護する `PROT`。設定を永久ロックする `CFGLCK` は立てない) |
+| 41 | MIRROR / AUTH0 (保護の開始ページ。**最後に書く**) |
+
+AUTH0 を先に書くと以降のページが保護されて PWD も書けなくなるので、設定は最後。
+書き終わったら、書いた PWD で認証し直して PACK (`BE EF`) を確認し、全ページを読み戻して照合する。
+成功すると、書き込んだ内容と同じダンプが `SD:/nfc/yokai/` にも保存される。
+
+- 必要なのは**空の NTAG213** (ロックもパスワードもかかっていないもの)。NTAG215/216 や
+  マジックタグではページ構成が違うため受け付けない。
+- ページ 0〜2 (UID / BCC / 静的ロックバイト) とページ 40 (動的ロックバイト) は書き換えない。
+  ロックをかけないので、同じタグに何度でも書き直せる。
+- このアプリで書いたタグは、PWD が UID から算出できるので、そのまま上書きできる。
+  別のパスワードがかかっているタグは `Tag already has another password` で止まる。
+- NXP の署名 (READ_SIG) は空タグのものがそのまま残る。妖怪ウォッチ4 は署名を確認しない
+  (READ_SIG を送っていないことを解析で確認済み)。
 
 ### yokai_medal_parser.fal (NFC アプリのプラグイン)
 

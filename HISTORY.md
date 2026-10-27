@@ -107,3 +107,14 @@
 - 未確認: 実機での書き込み (空の NTAG213 が手元に来てから確認する)。
   特に ページ 3 (NDEF の CC) は WRITE がビット OR になるタグがあるため、
   工場出荷状態 (`00 00 00 00` または `E1 10 12 00`) から `E1 11 12 0F` になるかを読み戻しで確認している。
+- ビルド確認: Unleashed SDK `unlshd-094` (API 88.19) で `.fap` を警告ゼロでビルド、APPCHK も通った。
+
+## 2026-10-27 Unleashed unlshd-094 対応
+
+- `.fal` のビルドで固定していた Unleashed のバージョンを `unlshd-093` → `unlshd-094` に上げた
+  (`.github/workflows/build.yml` の `UNLEASHED_REF`、`scripts/build_plugin.sh` の既定値)。
+  `.fap` 側 (ufbt action の `sdk-channel: release`) が最新リリースを引くため、093 のままだと
+  Release に別バージョン向けの `.fap` と `.fal` が並んでしまう。
+- 094 では fbt の出力先ディレクトリが `build/f7-firmware-D/` → `build/f7-firmware-DC/` に変わって
+  いて、`scripts/build_plugin.sh` が `.fal` のコピーに失敗していた (ビルド自体は成功していた)。
+  決め打ちをやめて `build/f7-firmware-*/.extapps/` から探すようにした。

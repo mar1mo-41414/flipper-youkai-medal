@@ -45,7 +45,7 @@ jobs:
     permissions:
       contents: write
     env:
-      UNLEASHED_REF: unlshd-093 # SDK バージョンを build-fap 側 (ufbt action) と合わせること
+      UNLEASHED_REF: unlshd-094 # SDK バージョンを build-fap 側 (ufbt action) と合わせること
     steps:
       - uses: actions/checkout@v4
 

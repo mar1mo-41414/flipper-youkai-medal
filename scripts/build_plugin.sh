@@ -9,13 +9,13 @@
 # usage: scripts/build_plugin.sh [出力先ディレクトリ (既定: dist_plugin)]
 #
 # 環境変数:
-#   UNLEASHED_REF   取得する Unleashed のタグ/ブランチ (既定: unlshd-093。.fap と同じ SDK バージョンに合わせる)
+#   UNLEASHED_REF   取得する Unleashed のタグ/ブランチ (既定: unlshd-094。.fap と同じ SDK バージョンに合わせる)
 #   UNLEASHED_SRC   既にローカルにある Unleashed のソースツリーを使う場合、そのパス (省略時は shallow clone)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${1:-$REPO_ROOT/dist_plugin}"
-REF="${UNLEASHED_REF:-unlshd-093}"
+REF="${UNLEASHED_REF:-unlshd-094}"
 PLUGIN_SUBDIR="applications/main/nfc/plugins/supported_cards"
 
 workdir=""
@@ -62,6 +62,14 @@ fi
 echo "fbt でビルド中..." >&2
 ( cd "$fw" && ./fbt fap_yokai_medal_parser )
 
+# 出力先のディレクトリ名はファームのビルド設定で変わる (unlshd-093 は f7-firmware-D、
+# unlshd-094 は f7-firmware-DC) ので、決め打ちせずに探す
+fal="$(ls -t "$fw"/build/f7-firmware-*/.extapps/yokai_medal_parser.fal 2>/dev/null | head -1)"
+[ -n "$fal" ] || {
+    echo "ビルド結果が見つかりません: $fw/build/f7-firmware-*/.extapps/yokai_medal_parser.fal" >&2
+    exit 1
+}
+
 mkdir -p "$OUT_DIR"
-cp "$fw/build/f7-firmware-D/.extapps/yokai_medal_parser.fal" "$OUT_DIR/"
-echo "-> $OUT_DIR/yokai_medal_parser.fal" >&2
+cp "$fal" "$OUT_DIR/"
+echo "-> $OUT_DIR/yokai_medal_parser.fal ($(basename "$(dirname "$(dirname "$fal")")"))" >&2

@@ -14,7 +14,7 @@ Distributed as two files.
 
 | File | What it does | Goes in |
 |---|---|---|
-| `yokai_medal.fap` | Standalone app: read, clone, change ID | `apps/NFC/` |
+| `yokai_medal.fap` | Standalone app: read, clone, change ID, write to a blank tag | `apps/NFC/` |
 | `yokai_medal_parser.fal` | Read-only plugin for the stock NFC app's "Read" | `apps_data/nfc/plugins/` |
 
 ## Features
@@ -22,6 +22,7 @@ Distributed as two files.
 - **Read**: derives the password from the UID, unlocks the tag and saves a full dump (both forms)
 - **Clone**: rebuilds a read (or saved) dump with a new random UID (`.fap` only)
 - **Change ID**: turns a Yo-kai Watch 4 ark into another ark type (another Yo-kai) (`.fap` only)
+- **Write**: writes a saved `.nfc` onto a blank NTAG213, turning it into a real medal / ark (`.fap` only)
 
 ## Install
 
@@ -36,11 +37,33 @@ Both depend on the firmware API version: use a build that matches your Unleashed
 
 ### yokai_medal.fap (standalone app)
 
-Apps → NFC → **Yo-kai Medal Reader**, then *Read (auto detect)*, a fixed game, or *Load .nfc file*.
-Dumps are saved to `SD:/nfc/yokai/`. On the result screen press **Edit** (right) for *Clone* or *Change ID*
-(3-char base-36 ID, e.g. `M88` = Jibanyan; see
-[YOKAI_IDS.md](https://github.com/mar1mo-41414/switch-youkaiwatch4-medal/blob/main/docs/YOKAI_IDS.md)).
-Yo-kai Watch 4 accepts each UID only once, so clone a new UID every time.
+Apps → NFC → **Yo-kai Medal Reader**, then *Read (auto detect)*, a fixed game, *Load .nfc file* or
+*Write .nfc to blank NTAG*. Dumps are saved to `SD:/nfc/yokai/`. On the result screen press **Edit**
+(right) for *Clone*, *Change ID* (3-char base-36 ID, e.g. `M88` = Jibanyan; see
+[YOKAI_IDS.md](https://github.com/mar1mo-41414/switch-youkaiwatch4-medal/blob/main/docs/YOKAI_IDS.md))
+or *Write to blank NTAG*.
+Yo-kai Watch 4 accepts each UID only once, so clone a new UID (or write another tag) every time.
+
+### Writing to a blank NTAG213
+
+Pick a dump with *Write .nfc to blank NTAG* (or *Edit → Write to blank NTAG*) and hold a blank
+NTAG213 against the Flipper.
+
+A tag's UID cannot be changed, so the keys and the password are **recomputed from the UID of the tag
+you present** — the UID inside the chosen `.nfc` is not used. One `.nfc` therefore makes any number
+of tags, each with its own UID (so Yo-kai Watch 4 keeps accepting them).
+
+Pages 3-39 (NDEF plus the protected data, re-encrypted for that tag), then PWD/PACK (43/44), then
+ACCESS (42) and finally AUTH0 (41) — the config page goes last, because AUTH0 locks every page above
+it, including the password. Afterwards the app re-authenticates with the password it wrote, checks
+PACK is `BE EF`, reads every page back and compares, and saves the same dump to `SD:/nfc/yokai/`.
+
+- Needs a **blank NTAG213** with no lock bits and no password. NTAG215/216 and magic tags are
+  rejected (different page layout).
+- Pages 0-2 (UID / BCC / static lock bytes) and page 40 (dynamic lock bytes) are left alone, and
+  `CFGLCK` stays off, so the same tag can be rewritten as often as you like.
+- The NXP signature of the blank tag is kept as is. Yo-kai Watch 4 never sends READ_SIG, so it is
+  not checked.
 
 ### yokai_medal_parser.fal (NFC app plugin)
 

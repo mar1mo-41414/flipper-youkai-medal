@@ -87,6 +87,7 @@ The config, PWD and PACK pages sit at different addresses per tag type, so each 
 ### Erasing a written tag
 
 *Erase NTAG (back to blank)* asks for confirmation; press **Erase** (right) and hold the tag.
+Verified on real hardware with an NTAG215.
 
 | Restored | Value |
 |---|---|

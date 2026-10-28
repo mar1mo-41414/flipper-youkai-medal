@@ -384,3 +384,13 @@
 - 実物のアークを 1 枚も持っていなくても、種別 ID だけで任意のアークを作って使えることになった。
 - これで v1.6 の機能は読み取り・複製・種類変更・新規作成・書き込み・消去の全部が実機で確認済み
   (空の NTAG213 / NTAG216 への書き込みと、妖怪ウォッチ3 のメダルは実物が無いため未確認)。
+
+## 2026-10-28 妖怪 ID 一覧を docs/YOUKAI_IDs.md に取り込み
+
+- `switch-youkaiwatch4-medal/docs/YOKAI_IDS.md` (妖怪が紐付いているアーク種別 79 件) を
+  `docs/YOUKAI_IDs.md` としてこのリポジトリにコピー。別リポジトリを見に行かなくても
+  Create / Change ID に入れる ID が分かるようにした。
+- コピーである旨と元ファイルへのリンクを先頭に明記 (抽出手順や解析の詳細は元リポジトリ側)。
+- ID の説明に **Create new ark (YW4)** を追記 (元は `make_nfc.py --id` と Change ID のみ)。
+- README / README-EN の ID 一覧へのリンクを、別リポジトリへの URL からローカルの
+  `docs/YOUKAI_IDs.md` に差し替え。Create の節にもリンクを追加した。

@@ -62,7 +62,7 @@ Apps → NFC → **Yo-kai Medal Reader**
 
 - **Clone (new random UID)**: 中身はそのままで、UID だけ新しくする
 - **Change ID + new UID** (妖怪ウォッチ4 のみ): 3 文字の ID (例 `M88` = ジバニャン) を入力して、その種類のアークを作る。
-  ID の一覧は [switch-youkaiwatch4-medal の docs/YOKAI_IDS.md](https://github.com/mar1mo-41414/switch-youkaiwatch4-medal/blob/main/docs/YOKAI_IDS.md)
+  ID の一覧は [docs/YOUKAI_IDs.md](docs/YOUKAI_IDs.md)
 - **Write to blank NTAG**: 今表示している中身を、かざした空のタグに書き込む
 
 妖怪ウォッチ4 は同じ UID のアークを 1 回しか読み込まない (「このアークは一度しか読み取れません」)。
@@ -74,6 +74,8 @@ Apps → NFC → **Yo-kai Medal Reader**
 **実物のアークもダンプも無しで**妖怪ウォッチ4 のアークのダンプ 1 枚を作る。
 そのまま `SD:/nfc/yokai/` に保存され、標準の NFC アプリでエミュレートしたり、
 Edit → Write to blank NTAG で空のタグに焼いたりできる。
+
+入れる ID の一覧は [docs/YOUKAI_IDs.md](docs/YOUKAI_IDs.md)。
 
 ゲームがアークの種類を決めているのは暗号化されたデータの中の種別 ID だけで、そこは UID から
 算出できるので、1 から組み立てられる。

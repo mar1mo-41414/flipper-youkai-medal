@@ -1438,7 +1438,7 @@ static void app_free(App* app) {
     free(app);
 }
 
-int32_t youkai_medal_app(void* p) {
+int32_t yokai_medal_app(void* p) {
     UNUSED(p);
     App* app = app_alloc();
     switch_view(app, ViewMenu);

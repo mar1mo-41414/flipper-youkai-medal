@@ -7,7 +7,7 @@
  * 読み取りに成功すると、NFC アプリが自動で /ext/nfc/ 配下にダンプを保存する (PWD/PACK 入り)。
  *
  * UID や種類を変える複製・編集機能はこちらには無い。そちらは Apps から直接起動する
- * Yo-kai Medal Reader (youkai_medal.c, yokai_medal.fap) を使う。
+ * Yo-kai Medal Reader (yokai_medal.c, yokai_medal.fap) を使う。
  * 鍵導出 (HMAC-SHA256 x2 + ニブル置換 + AES-128-CTR) は ym_crypto.c と共有している。 */
 
 #include "nfc_supported_card_plugin_abi.h"

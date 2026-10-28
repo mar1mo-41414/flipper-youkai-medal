@@ -46,7 +46,7 @@ Apps → NFC → **Yo-kai Medal Reader**, then *Read (auto detect)*, a fixed gam
 *Create new ark (YW4)*, *Write .nfc to blank NTAG* or *Erase NTAG (back to blank)*. Dumps are saved
 to `SD:/nfc/yokai/`.
 On the result screen press **Edit** (right) for *Clone*, *Change ID* (3-char base-36 ID, e.g. `M88` =
-Jibanyan; see [docs/YOUKAI_IDs.md](docs/YOUKAI_IDs.md)) or *Write to blank NTAG*.
+Jibanyan; see [docs/YOKAI_IDS.md](docs/YOKAI_IDS.md)) or *Write to blank NTAG*.
 Yo-kai Watch 4 accepts each UID only once, so clone a new UID (or write another tag) every time.
 
 ### Creating an ark without a source dump
@@ -55,7 +55,7 @@ Yo-kai Watch 4 accepts each UID only once, so clone a new UID (or write another 
 Yo-kai Watch 4 ark dump **without any real ark or existing dump**. It is saved to `SD:/nfc/yokai/`,
 ready to emulate with the stock NFC app or to write onto a blank tag via *Edit → Write to blank NTAG*.
 
-The list of IDs to enter is in [docs/YOUKAI_IDs.md](docs/YOUKAI_IDs.md) (Japanese).
+The list of IDs to enter is in [docs/YOKAI_IDS.md](docs/YOKAI_IDS.md) (Japanese).
 
 The only thing that decides an ark's type is the ID inside its encrypted data, and that is derivable
 from the UID, so the whole dump can be assembled from scratch.

@@ -385,12 +385,29 @@
 - これで v1.6 の機能は読み取り・複製・種類変更・新規作成・書き込み・消去の全部が実機で確認済み
   (空の NTAG213 / NTAG216 への書き込みと、妖怪ウォッチ3 のメダルは実物が無いため未確認)。
 
-## 2026-10-28 妖怪 ID 一覧を docs/YOUKAI_IDs.md に取り込み
+## 2026-10-28 妖怪 ID 一覧を docs/YOKAI_IDS.md に取り込み
 
 - `switch-youkaiwatch4-medal/docs/YOKAI_IDS.md` (妖怪が紐付いているアーク種別 79 件) を
-  `docs/YOUKAI_IDs.md` としてこのリポジトリにコピー。別リポジトリを見に行かなくても
+  `docs/YOKAI_IDS.md` としてこのリポジトリにコピー。別リポジトリを見に行かなくても
   Create / Change ID に入れる ID が分かるようにした。
 - コピーである旨と元ファイルへのリンクを先頭に明記 (抽出手順や解析の詳細は元リポジトリ側)。
 - ID の説明に **Create new ark (YW4)** を追記 (元は `make_nfc.py --id` と Change ID のみ)。
 - README / README-EN の ID 一覧へのリンクを、別リポジトリへの URL からローカルの
-  `docs/YOUKAI_IDs.md` に差し替え。Create の節にもリンクを追加した。
+  `docs/YOKAI_IDS.md` に差し替え。Create の節にもリンクを追加した。
+
+## 2026-10-28 プロジェクト内の表記を yokai に統一
+
+- リポジトリ内で `youkai` と `yokai` が混在していたので、多数派の **`yokai`** に寄せた
+  (出現数: `yokai` 86 / `youkai` 34)。成果物名 (`yokai_medal.fap` / `yokai_medal_parser.fal`)、
+  `appid`、SD の保存先 (`nfc/yokai`) は元から `yokai` 側だったため、
+  **リリース済みのファイル名や保存先は変わらない** (利用者への影響なし)。
+- 変更:
+  - `youkai_medal.c` → `yokai_medal.c` (`application.fam` の `sources` も追従)
+  - エントリポイント `youkai_medal_app` → `yokai_medal_app` (`entry_point` も追従)
+  - 前のコミットで追加した `docs/YOUKAI_IDs.md` → `docs/YOKAI_IDS.md`
+    (元ファイルと別リポジトリの表記に合わせた)。README / README-EN / HISTORY のリンクも追従
+- 変更していないもの: **GitHub のリポジトリ名を含む URL**
+  (`flipper-youkai-medal`、`switch-youkaiwatch4-medal`)。リンクが壊れるため。
+  このリポジトリ名だけ `youkai` のまま残る。
+- ビルド確認: `.fap` (ufbt) と `.fal` (フルソース + fbt) ともに警告ゼロ・APPCHK 通過、
+  crypto テストも通過。

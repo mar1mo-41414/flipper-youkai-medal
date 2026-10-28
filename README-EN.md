@@ -107,6 +107,12 @@ and the factory password `FF FF FF FF` is used for one final PWD_AUTH check.
   stay set. An ark's CC is `E1 11 12 0F`, and the trailing `0F` means "NDEF write access denied",
   so **phone NFC apps will treat the tag as read-only**. The memory itself is still writable with
   raw WRITE commands, so the Flipper and other low-level tools can rewrite it freely.
+- Because the CC stays, an erased tag still *looks* like an ark if you only read page 3. Detection
+  therefore also requires the NDEF area (page 4) to be present: an erased tag shows up as
+  `Not a medal/ark?` in the `.fap`, and the `.fal` declines it so the stock NFC app reads it as a
+  plain NTAG.
+- The game will not accept it: the password is back to factory, so PWD_AUTH no longer answers
+  `BE EF`, and the protected pages are zeros.
 - Lock bytes are never touched, so nothing is locked.
 - Only the written range (pages 4-39) is cleared; pages 40+ on NTAG215/216 are left as they were.
 - **On a real medal / ark this also erases its NDEF URL, which is unique and cannot be restored.**

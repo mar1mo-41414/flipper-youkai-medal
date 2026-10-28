@@ -24,15 +24,31 @@
 
 #define TAG "YokaiMedalParser"
 
-/* ページ 3: 3DS メダル = F5 10 12 00 (直後のページ 4 が "BABO")、4 のアーク = NDEF CC (E1 ..) */
+/* ページ 3 で種類を判別する。
+ * 3DS メダル = F5 10 12 00 (直後のページ 4 が "BABO")。
+ * 妖怪ウォッチ4 のアーク = NDEF の CC が E1 11 12 0F。工場出荷の NTAG は
+ * E1 10 12 00 (213) / E1 10 3E 00 (215) なので、バージョンのニブル (1.1) と
+ * アクセス条件 (0F = NDEF 書き込み不可) まで見れば普通の NDEF タグと区別できる。 */
 static bool yokai_medal_game_from_page3(const uint8_t* p3, YmGame* out) {
     if(p3[0] == 0xF5 && p3[1] == 0x10) {
         *out = YmGameYw3;
         return true;
     }
-    if(p3[0] == 0xE1) {
+    if(p3[0] == 0xE1 && (p3[1] & 0x01) && (p3[3] & 0x0F) == 0x0F) {
         *out = YmGameYw4;
         return true;
+    }
+    return false;
+}
+
+/* 消去済みのタグを弾くための、NDEF (ページ 4) が残っているかの確認。
+ * ページ 3 の CC は WRITE がビット OR で元に戻せないため、.fap の Erase で消したタグにも
+ * アークの CC がそのまま残り、ページ 3 だけでは消去済みと区別できない。
+ * YW4 のアークは AUTH0 = 0x1C なのでページ 4 は認証なしで読める
+ * (YW3 は AUTH0 = 6 なので、この確認は YW4 だけに使う)。 */
+static bool yokai_medal_page_has_data(const MfUltralightPage* page) {
+    for(size_t i = 0; i < MF_ULTRALIGHT_PAGE_SIZE; i++) {
+        if(page->data[i]) return true;
     }
     return false;
 }
@@ -47,9 +63,19 @@ static bool yokai_medal_verify(Nfc* nfc) {
         return false;
     }
     YmGame game;
-    bool ok = yokai_medal_game_from_page3(page3.data, &game);
-    if(!ok) FURI_LOG_D(TAG, "Page 3 does not match YW3/YW4");
-    return ok;
+    if(!yokai_medal_game_from_page3(page3.data, &game)) {
+        FURI_LOG_D(TAG, "Page 3 does not match YW3/YW4");
+        return false;
+    }
+    if(game == YmGameYw4) {
+        MfUltralightPage page4;
+        if(mf_ultralight_poller_sync_read_page(nfc, 4, &page4) != MfUltralightErrorNone ||
+           !yokai_medal_page_has_data(&page4)) {
+            FURI_LOG_D(TAG, "NDEF area is empty (erased tag?)");
+            return false;
+        }
+    }
+    return true;
 }
 
 static bool yokai_medal_read(Nfc* nfc, NfcDevice* device) {
@@ -67,6 +93,13 @@ static bool yokai_medal_read(Nfc* nfc, NfcDevice* device) {
 
         YmGame game;
         if(!yokai_medal_game_from_page3(page3.data, &game)) break;
+
+        /* YW4 は NDEF も見て、消去済みのタグを弾く */
+        if(game == YmGameYw4) {
+            MfUltralightPage page4;
+            if(mf_ultralight_poller_sync_read_page(nfc, 4, &page4) != MfUltralightErrorNone) break;
+            if(!yokai_medal_page_has_data(&page4)) break;
+        }
 
         /* UID = ページ 0 の先頭 3 バイト + ページ 1 の 4 バイト (NXP の 7 バイト UID) */
         uint8_t uid[YM_UID_LEN];
@@ -107,9 +140,10 @@ static bool yokai_medal_parse(const NfcDevice* device, FuriString* parsed_data) 
 
     bool parsed = false;
     do {
-        if(data->pages_read < 4) break;
+        if(data->pages_read < 5) break;
         YmGame game;
         if(!yokai_medal_game_from_page3(data->page[3].data, &game)) break;
+        if(game == YmGameYw4 && !yokai_medal_page_has_data(&data->page[4])) break;
 
         uint8_t uid[YM_UID_LEN];
         uid[0] = data->page[0].data[0];

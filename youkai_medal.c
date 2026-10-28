@@ -148,15 +148,33 @@ static const char* game_name(YmGame g) {
     return g == YmGameYw3 ? "YW3 medal (3DS)" : "YW4 ark (Switch)";
 }
 
-/* ページ 3: 3DS メダル = F5 10 12 00 (直後のページ 4 が "BABO")、4 のアーク = NDEF CC (E1 ..) */
+/* ページ 3 で種類を判別する。
+ * 3DS メダル = F5 10 12 00 (直後のページ 4 が "BABO")。
+ * 妖怪ウォッチ4 のアーク = NDEF の CC が E1 11 12 0F。工場出荷の NTAG は
+ * E1 10 12 00 (213) / E1 10 3E 00 (215) なので、バージョンのニブル (1.1) と
+ * アクセス条件 (0F = NDEF 書き込み不可) まで見れば普通の NDEF タグと区別できる。 */
 static bool game_from_page3(const uint8_t* p3, YmGame* out) {
     if(p3[0] == 0xF5 && p3[1] == 0x10) {
         *out = YmGameYw3;
         return true;
     }
-    if(p3[0] == 0xE1) {
+    if(p3[0] == 0xE1 && (p3[1] & 0x01) && (p3[3] & 0x0F) == 0x0F) {
         *out = YmGameYw4;
         return true;
+    }
+    return false;
+}
+
+/* 消去済みのタグを弾くための、NDEF (ページ 4 以降) が残っているかの確認。
+ * ページ 3 の CC は WRITE がビット OR で元に戻せないため、消去してもアークの CC がそのまま
+ * 残り、ページ 3 だけでは消去済みと区別できない。
+ * YW4 のアークは AUTH0 = 0x1C なので、ページ 4〜7 は認証なしで読める
+ * (YW3 は AUTH0 = 6 で ページ 6 以降が保護されるため、この確認は YW4 だけに使う)。 */
+static bool pages_have_data(const MfUltralightPage* pages, size_t count) {
+    for(size_t p = 0; p < count; p++) {
+        for(size_t i = 0; i < MF_ULTRALIGHT_PAGE_SIZE; i++) {
+            if(pages[p].data[i]) return true;
+        }
     }
     return false;
 }
@@ -199,6 +217,13 @@ static NfcCommand poller_callback(NfcGenericEvent event, void* context) {
             MfUltralightPageReadCommandData rd;
             app->detected = mf_ultralight_poller_read_page(event.instance, 0, &rd) == MfUltralightErrorNone &&
                             game_from_page3(rd.page[3].data, &app->game);
+            /* YW4 は NDEF も見て、消去済みのタグを弾く */
+            if(app->detected && app->game == YmGameYw4) {
+                MfUltralightPageReadCommandData nd;
+                app->detected =
+                    mf_ultralight_poller_read_page(event.instance, 4, &nd) == MfUltralightErrorNone &&
+                    pages_have_data(nd.page, 4);
+            }
             if(!app->detected) app->game = YmGameYw4;
         }
         if(uid_len != YM_UID_LEN) {
@@ -820,13 +845,15 @@ static void show_result(App* app) {
     const uint8_t* uid = mf_ultralight_get_uid(app->data, &uid_len);
     analyze(app);
 
-    static const char* src_name[] = {"", "Loaded: ", "Created: "};
-    furi_string_cat_printf(
-        s,
-        "%s%s%s\n",
-        src_name[app->source],
-        game_name(app->game),
-        (app->source != SourceCreated && !app->detected) ? " ?" : "");
+    if(app->source == SourceCreated) {
+        furi_string_cat_printf(s, "Created: %s\n", game_name(app->game));
+    } else if(app->detected) {
+        furi_string_cat_printf(
+            s, "%s%s\n", app->source == SourceLoaded ? "Loaded: " : "", game_name(app->game));
+    } else {
+        /* ページ 3 の CC か NDEF がメダル / アークの形をしていない (消去済みのタグなど) */
+        furi_string_cat_printf(s, "Not a medal/ark?\n(tried as %s)\n", game_name(app->game));
+    }
     furi_string_cat_str(s, "UID: ");
     append_hex(s, uid, uid_len);
     furi_string_cat_str(s, "\nPWD: ");
@@ -994,7 +1021,8 @@ static bool load_file(App* app) {
     }
     mf_ultralight_copy(
         app->data, (const MfUltralightData*)nfc_device_get_data(app->device, NfcProtocolMfUltralight));
-    app->detected = game_from_page3(app->data->page[3].data, &app->game);
+    app->detected = game_from_page3(app->data->page[3].data, &app->game) &&
+                    (app->game == YmGameYw3 || pages_have_data(&app->data->page[4], 4));
     if(!app->detected) app->game = YmGameYw4;
     size_t uid_len = 0;
     const uint8_t* uid = mf_ultralight_get_uid(app->data, &uid_len);
@@ -1030,7 +1058,7 @@ static void load_and_write(App* app) {
 static void show_about(App* app) {
     show_message(
         app,
-        "Yo-kai Medal Reader v1.5.1\n"
+        "Yo-kai Medal Reader v1.5.2\n"
         "Unlocks NTAG213 Yo-kai medals\n"
         "(Yo-kai Watch 3, 3DS) and\n"
         "Yo-kai arks (Yo-kai Watch 4,\n"

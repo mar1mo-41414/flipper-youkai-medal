@@ -22,6 +22,7 @@ Distributed as two files.
 - **Read**: derives the password from the UID, unlocks the tag and saves a full dump (both forms)
 - **Clone**: rebuilds a read (or saved) dump with a new random UID (`.fap` only)
 - **Change ID**: turns a Yo-kai Watch 4 ark into another ark type (another Yo-kai) (`.fap` only)
+- **Create**: builds a Yo-kai Watch 4 ark dump from just a 3-character ark ID, with no source dump (`.fap` only)
 - **Write**: writes a saved `.nfc` onto a blank NTAG213/215/216, turning it into a real medal / ark (`.fap` only)
 - **Erase**: puts a written tag back to blank so it can be used as a plain NTAG again (`.fap` only)
 
@@ -42,12 +43,30 @@ Both depend on the firmware API version: use a build that matches your Unleashed
 ### yokai_medal.fap (standalone app)
 
 Apps → NFC → **Yo-kai Medal Reader**, then *Read (auto detect)*, a fixed game, *Load .nfc file*,
-*Write .nfc to blank NTAG* or *Erase NTAG (back to blank)*. Dumps are saved to `SD:/nfc/yokai/`.
+*Create new ark (YW4)*, *Write .nfc to blank NTAG* or *Erase NTAG (back to blank)*. Dumps are saved
+to `SD:/nfc/yokai/`.
 On the result screen press **Edit** (right) for *Clone*, *Change ID* (3-char base-36 ID, e.g. `M88` =
 Jibanyan; see
 [YOKAI_IDS.md](https://github.com/mar1mo-41414/switch-youkaiwatch4-medal/blob/main/docs/YOKAI_IDS.md))
 or *Write to blank NTAG*.
 Yo-kai Watch 4 accepts each UID only once, so clone a new UID (or write another tag) every time.
+
+### Creating an ark without a source dump
+
+*Create new ark (YW4)* asks for a 3-character ark ID (e.g. `M88` = Jibanyan) and builds a complete
+Yo-kai Watch 4 ark dump **without any real ark or existing dump**. It is saved to `SD:/nfc/yokai/`,
+ready to emulate with the stock NFC app or to write onto a blank tag via *Edit → Write to blank NTAG*.
+
+The only thing that decides an ark's type is the ID inside its encrypted data, and that is derivable
+from the UID, so the whole dump can be assembled from scratch.
+
+- **The NXP signature cannot be forged** (it is signed with NXP's private key over the tag's UID),
+  so it stays zero. The game never reads it. When written onto a physical tag, that tag's own
+  genuine signature remains.
+- The NDEF URL is synthesized as `https://www.ywg.jp/<ID>`. A real token has an unknown string after
+  the ID, but the game does not read the URL.
+- **Not verified with the game yet.** Arks derived from a real dump are verified on hardware; one
+  built entirely from scratch has not been tested.
 
 ### Writing to a blank NTAG
 

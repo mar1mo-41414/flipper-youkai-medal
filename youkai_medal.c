@@ -49,6 +49,7 @@ typedef enum {
     MenuReadYw3,
     MenuReadYw4,
     MenuLoad,
+    MenuCreate,
     MenuWrite,
     MenuErase,
     MenuAbout,
@@ -73,6 +74,12 @@ typedef enum {
     SourceLoaded,
     SourceCreated,
 } Source;
+
+/* ID 入力画面を何のために出しているか */
+typedef enum {
+    IdInputChangeId, /* 既存のダンプの種別 ID を変える */
+    IdInputCreate, /* 0 からアークを作る */
+} IdInputPurpose;
 
 /* NFC スレッドで行う処理 */
 typedef enum {
@@ -118,6 +125,7 @@ typedef struct {
     ViewId current;
     Source source;
     Operation op;
+    IdInputPurpose id_purpose;
     char id_buf[8];
 
     /* poller コールバック (NFC スレッド) で埋める */
@@ -423,6 +431,101 @@ static void rebuild_with_new_uid(App* app) {
     uid[0] = 0x04; /* NXP */
     furi_hal_random_fill_buf(&uid[1], YM_UID_LEN - 1);
     rebuild_with_uid(app, uid);
+}
+
+/* ---------- 0 からアークを作る ---------- */
+
+/* NTAG213 の GET_VERSION 応答。ファームの mf_ultralight_get_type_by_version() は
+ * storage_size 0x0F + prod_type の下位ニブル 4 (NTAG) をこれと同じく NTAG213 と判定する */
+static const uint8_t NTAG213_VERSION[8] = {0x00, 0x04, 0x04, 0x02, 0x01, 0x00, 0x0F, 0x03};
+
+/* 実物のアークと同じ固定ページ */
+static const uint8_t ARK_CC[4] = {0xE1, 0x11, 0x12, 0x0F}; /* ページ 3: NDEF の CC */
+static const uint8_t ARK_MAGIC[4] = {0xBA, 0xB0, 0x01, 0x01}; /* ページ 27 */
+static const uint8_t ARK_DYN_LOCK[4] = {0x00, 0x00, 0x00, 0xBD}; /* ページ 40: 動的ロック (BD は RFUI) */
+static const uint8_t ARK_CFG0[4] = {0x04, 0x00, 0x00, 0x1C}; /* MIRROR / AUTH0 = 0x1C */
+static const uint8_t ARK_CFG1[4] = {0xC0, 0x00, 0x00, 0x00}; /* ACCESS: PROT + CFGLCK */
+
+#define ARK_NDEF_FIRST_PAGE 4
+#define ARK_NDEF_PAGES      (27 - ARK_NDEF_FIRST_PAGE) /* ページ 4〜26 */
+
+/* NDEF に https://www.ywg.jp/<ID> を置く。実物のトークンは <ID> + 規則不明の文字列なので、
+ * ゲームが種類を決めるのに使う先頭 3 文字 (種別 ID) だけ合わせる。
+ * ゲームは NDEF を読まない (実機で確認済み) が、
+ *  - このアプリ / プラグインの種別判定が「NDEF が残っていること」も見る
+ *  - スマホからも妥当な URL として見える
+ * ので埋めておく。 */
+static void build_ark_ndef(uint8_t* buf, size_t len, const char* id) {
+    memset(buf, 0, len);
+    char url[24];
+    int n = snprintf(url, sizeof(url), "www.ywg.jp/%.3s", id);
+    if(n < 0) return;
+    size_t url_len = (size_t)n;
+    if(7 + url_len + 1 > len) return; /* 入らない (ID が 3 文字なら起きない) */
+
+    size_t i = 0;
+    buf[i++] = 0x03; /* NDEF メッセージ TLV */
+    buf[i++] = (uint8_t)(4 + 1 + url_len); /* レコードの長さ */
+    buf[i++] = 0xD1; /* MB | ME | SR, TNF = NFC Forum well-known */
+    buf[i++] = 0x01; /* タイプ長 */
+    buf[i++] = (uint8_t)(1 + url_len); /* ペイロード長 */
+    buf[i++] = 'U'; /* URI レコード */
+    buf[i++] = 0x04; /* 前置コード: https:// */
+    memcpy(&buf[i], url, url_len);
+    i += url_len;
+    buf[i++] = 0xFE; /* 終端 TLV */
+}
+
+/* 元ダンプなしで、妖怪ウォッチ4 のアークのダンプ (NTAG213) を組み立てる。
+ * app->plain (= 種別 ID を入れた平文) は呼び出し側で用意しておく。
+ *
+ * NXP の署名 (READ_SIG の値) は UID に対する NXP の秘密鍵の署名なので作れず、0 のまま。
+ * ゲームは READ_SIG を送らないので影響しない (解析で確認済み)。
+ * 物理タグに書く場合は、そのタグ自身の本物の署名が残る。 */
+static void create_ark_from_scratch(App* app) {
+    /* mf_ultralight_reset() は iso14443_3a 側しか消さないので、残りは自分で消す */
+    mf_ultralight_reset(app->data);
+    memset(app->data->page, 0, sizeof(app->data->page));
+    memset(&app->data->version, 0, sizeof(app->data->version));
+    memset(&app->data->signature, 0, sizeof(app->data->signature));
+    memset(app->data->counter, 0, sizeof(app->data->counter));
+    memset(app->data->tearing_flag, 0, sizeof(app->data->tearing_flag));
+    app->data->auth_attempts = 0;
+
+    app->game = YmGameYw4;
+    app->detected = true;
+    app->data->type = MfUltralightTypeNTAG213;
+    app->data->pages_total = mf_ultralight_get_pages_total(MfUltralightTypeNTAG213);
+    app->data->pages_read = app->data->pages_total;
+    memcpy(&app->data->version, NTAG213_VERSION, sizeof(NTAG213_VERSION));
+
+    /* エミュレートに必要な ISO14443-3A の値。NTAG は SAK = 00、ATQA の下位バイトは
+     * UID の長さ (7 バイトなら 0x44) */
+    Iso14443_3aData* iso = mf_ultralight_get_base_data(app->data);
+    const uint8_t atqa[2] = {0x44, 0x00};
+    iso14443_3a_set_atqa(iso, atqa);
+    iso14443_3a_set_sak(iso, 0x00);
+
+    char id[4];
+    yw4_id(app, id);
+    memcpy(app->data->page[3].data, ARK_CC, MF_ULTRALIGHT_PAGE_SIZE);
+    uint8_t ndef[ARK_NDEF_PAGES * MF_ULTRALIGHT_PAGE_SIZE];
+    build_ark_ndef(ndef, sizeof(ndef), id);
+    for(uint8_t i = 0; i < ARK_NDEF_PAGES; i++) {
+        memcpy(
+            app->data->page[ARK_NDEF_FIRST_PAGE + i].data,
+            &ndef[i * MF_ULTRALIGHT_PAGE_SIZE],
+            MF_ULTRALIGHT_PAGE_SIZE);
+    }
+    memcpy(app->data->page[27].data, ARK_MAGIC, MF_ULTRALIGHT_PAGE_SIZE);
+    memcpy(app->data->page[40].data, ARK_DYN_LOCK, MF_ULTRALIGHT_PAGE_SIZE);
+    memcpy(app->data->page[41].data, ARK_CFG0, MF_ULTRALIGHT_PAGE_SIZE);
+    memcpy(app->data->page[42].data, ARK_CFG1, MF_ULTRALIGHT_PAGE_SIZE);
+
+    /* 乱数 UID で ページ 0〜2 (UID / BCC)・保護データ・PWD / PACK を埋める。
+     * ページ 2 の internal バイトは NTAG21x の固定値 */
+    rebuild_with_new_uid(app);
+    app->data->page[2].data[1] = 0x48;
 }
 
 /* ---------- 空の NTAG への書き込み ---------- */
@@ -1058,7 +1161,7 @@ static void load_and_write(App* app) {
 static void show_about(App* app) {
     show_message(
         app,
-        "Yo-kai Medal Reader v1.5.2\n"
+        "Yo-kai Medal Reader v1.6\n"
         "Unlocks NTAG213 Yo-kai medals\n"
         "(Yo-kai Watch 3, 3DS) and\n"
         "Yo-kai arks (Yo-kai Watch 4,\n"
@@ -1068,6 +1171,14 @@ static void show_about(App* app) {
         "SD:/nfc/yokai/\n"
         "Auto: page 3 decides\n"
         "F5 10.. = YW3, E1 .. = YW4\n"
+        "\n"
+        "Create new ark (YW4):\n"
+        "builds a full NTAG213 dump\n"
+        "from just a 3-char ark ID,\n"
+        "with no source dump. The\n"
+        "NXP signature cannot be\n"
+        "forged and stays zero; the\n"
+        "game never reads it.\n"
         "\n"
         "Edit (after read/load):\n"
         "- Clone: same data,\n"
@@ -1097,6 +1208,9 @@ static void show_about(App* app) {
 
 /* ---------- UI ---------- */
 
+/* ID 入力画面は text_input のコールバックを使うので、下の方で定義している */
+static void ask_ark_id(App* app, IdInputPurpose purpose);
+
 static void menu_callback(void* context, uint32_t index) {
     App* app = context;
     app->mode = (MenuItem)index;
@@ -1106,6 +1220,10 @@ static void menu_callback(void* context, uint32_t index) {
         break;
     case MenuLoad:
         if(load_file(app)) show_result(app);
+        break;
+    case MenuCreate:
+        app->id_buf[0] = '\0';
+        ask_ark_id(app, IdInputCreate);
         break;
     case MenuWrite:
         load_and_write(app);
@@ -1131,6 +1249,16 @@ static void text_input_done(void* context) {
     view_dispatcher_send_custom_event(app->vd, EventIdEntered);
 }
 
+/* 3 文字の種別 ID を入力させる */
+static void ask_ark_id(App* app, IdInputPurpose purpose) {
+    app->id_purpose = purpose;
+    text_input_reset(app->text_input);
+    text_input_set_header_text(app->text_input, "Ark ID (3 chars, e.g. M88)");
+    text_input_set_minimum_length(app->text_input, 3);
+    text_input_set_result_callback(app->text_input, text_input_done, app, app->id_buf, 4, false);
+    switch_view(app, ViewTextInput);
+}
+
 static void edit_callback(void* context, uint32_t index) {
     App* app = context;
     if(index == EditClone) {
@@ -1139,11 +1267,7 @@ static void edit_callback(void* context, uint32_t index) {
         start_write(app);
     } else if(index == EditChangeId) {
         yw4_id(app, app->id_buf);
-        text_input_reset(app->text_input);
-        text_input_set_header_text(app->text_input, "Ark ID (3 chars, e.g. M88)");
-        text_input_set_minimum_length(app->text_input, 3);
-        text_input_set_result_callback(app->text_input, text_input_done, app, app->id_buf, 4, false);
-        switch_view(app, ViewTextInput);
+        ask_ark_id(app, IdInputChangeId);
     }
 }
 
@@ -1208,7 +1332,13 @@ static bool custom_event_callback(void* context, uint32_t event) {
         return true;
     case EventIdEntered:
         if(apply_id(app)) {
-            create_and_show(app);
+            if(app->id_purpose == IdInputCreate) {
+                create_ark_from_scratch(app);
+                app->source = SourceCreated;
+                show_result(app);
+            } else {
+                create_and_show(app);
+            }
         } else {
             show_message(app, "Invalid ID.\nUse 3 chars of 0-9 / A-Z\n(e.g. M88, MCN, MD2)");
             app->valid = false;
@@ -1226,7 +1356,7 @@ static bool back_callback(void* context) {
         view_dispatcher_stop(app->vd);
         break;
     case ViewTextInput:
-        switch_view(app, ViewEdit);
+        switch_view(app, app->id_purpose == IdInputCreate ? ViewMenu : ViewEdit);
         break;
     case ViewEdit:
         switch_view(app, ViewResult);
@@ -1266,6 +1396,7 @@ static App* app_alloc(void) {
     submenu_add_item(app->menu, "Read YW3 medal (3DS)", MenuReadYw3, menu_callback, app);
     submenu_add_item(app->menu, "Read YW4 ark (Switch)", MenuReadYw4, menu_callback, app);
     submenu_add_item(app->menu, "Load .nfc file", MenuLoad, menu_callback, app);
+    submenu_add_item(app->menu, "Create new ark (YW4)", MenuCreate, menu_callback, app);
     submenu_add_item(app->menu, "Write .nfc to blank NTAG", MenuWrite, menu_callback, app);
     submenu_add_item(app->menu, "Erase NTAG (back to blank)", MenuErase, menu_callback, app);
     submenu_add_item(app->menu, "About", MenuAbout, menu_callback, app);

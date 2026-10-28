@@ -85,9 +85,9 @@ NDEF の URL と NXP の署名 (READ_SIG の値) は元のまま残す。妖怪�
    UID は 7 バイトであること
 2. ページ 0〜3 を読んで静的ロックバイト (ページ 2 の 3・4 バイト目) を確認。
    このページ 0〜3 は書き込む内容の土台にも使う
-3. 設定ページを読む。読めない、または AUTH0 が PACK のページ以下 = 既に保護範囲に入っているなら、
-   この UID から算出した PWD で解除を試す (このアプリで書いたタグなら通る)。
-   動的ロックバイトも確認する
+3. 設定ページを読んで動的ロックバイトを確認する。保護されていれば UID から算出した PWD で解除する
+   (このアプリで書いたタグなら通る)。認証と READ の順番には制約があるので、
+   後述の「PWD_AUTH を送る順番」を参照
 4. 書き込む内容を `app->out` に組み立てる (`build_write_data`)。土台はかざした実タグ
    (種類・バージョン・署名・ページ数・UID) で、そこに元ダンプのページ 3〜39 を載せ、
    保護データはそのタグの UID の鍵で暗号化し直す。PWD / PACK / 設定は、そのタグの種類の位置に置く
@@ -215,8 +215,25 @@ supported_cards プラグイン。verify/read は `ym_crypto.c` の鍵導出を 
   `mf_ultralight_poller_sync_read_card()` に渡す。NFC アプリ本体が保存を行う
 - `parse(device, parsed_data)`: 保存済みのダンプから UID/PWD/チェックサムを表示用テキストにする
 
-ビルドは `.fap` と別系統 (`scripts/build_plugin.sh`)。理由は README を参照。
-複製・種類の変更・書き込みはこちらには実装しない (`.fap` のみ)。
+複製・種類の変更・書き込み・消去はこちらには実装しない (`.fap` のみ)。
+
+### ビルドが `.fap` と別系統な理由
+
+`.fal` は ufbt (SDK だけ) ではビルドできない。supported_cards プラグインは
+`apptype=FlipperAppType.PLUGIN` / `requires=["nfc"]` で、親アプリ `nfc` の `application.fam` が
+存在するソースツリー内でないとビルドできず、ufbt の環境には `nfc` アプリのマニフェストが無いため
+`Missing application manifest for 'nfc'` で失敗する。
+
+そのため `scripts/build_plugin.sh` が Unleashed ファームウェア全体を shallow clone し、
+`applications/main/nfc/plugins/supported_cards/` にこのリポジトリのプラグインを仮配置して、
+公式の `fbt` でビルドする。バージョンは既定で Unleashed の最新リリースを
+`up.unleashedflip.com/directory.json` の release チャンネルから解決する (`.fap` 側の ufbt と
+同じ出どころなので、`.fap` と `.fal` が別バージョン向けになることがない)。
+使ったバージョンは `出力先/unleashed_ref.txt` に書き出し、CI が artifact 名に使う。
+
+NFC アプリのプラグイン ABI (`NfcSupportedCardsPlugin` 構造体と verify/read/parse のシグネチャ) は、
+Unleashed 本体 (GPL-3.0) のヘッダを複製せず、型定義だけを
+`nfc_plugin/nfc_supported_card_plugin_abi.h` として自前で書き起こしている (このリポジトリは MIT)。
 
 タグの種類には依存しない作りになっている (`read()` は `mf_ultralight_poller_sync_read_card()` に
 任せ、`parse()` は `ym_data_first_page()` とページ 28〜39 しか見ない) ので、

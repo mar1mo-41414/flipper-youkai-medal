@@ -14,7 +14,7 @@ Distributed as two files.
 
 | File | What it does | Goes in |
 |---|---|---|
-| `yokai_medal.fap` | Standalone app: read, clone, change ID, write to a blank tag | `apps/NFC/` |
+| `yokai_medal.fap` | Standalone app: read, clone, change ID, write to a blank tag, erase | `apps/NFC/` |
 | `yokai_medal_parser.fal` | Read-only plugin for the stock NFC app's "Read" | `apps_data/nfc/plugins/` |
 
 ## Features
@@ -24,6 +24,9 @@ Distributed as two files.
 - **Change ID**: turns a Yo-kai Watch 4 ark into another ark type (another Yo-kai) (`.fap` only)
 - **Write**: writes a saved `.nfc` onto a blank NTAG213/215/216, turning it into a real medal / ark (`.fap` only)
 - **Erase**: puts a written tag back to blank so it can be used as a plain NTAG again (`.fap` only)
+
+How it works — password derivation, tag memory layout, the write and erase procedures — is documented
+in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (Japanese).
 
 ## Install
 
@@ -39,8 +42,9 @@ Both depend on the firmware API version: use a build that matches your Unleashed
 ### yokai_medal.fap (standalone app)
 
 Apps → NFC → **Yo-kai Medal Reader**, then *Read (auto detect)*, a fixed game, *Load .nfc file*,
-*Write .nfc to blank NTAG* or *Erase NTAG (back to blank)*. Dumps are saved to `SD:/nfc/yokai/`. On the result screen press **Edit**
-(right) for *Clone*, *Change ID* (3-char base-36 ID, e.g. `M88` = Jibanyan; see
+*Write .nfc to blank NTAG* or *Erase NTAG (back to blank)*. Dumps are saved to `SD:/nfc/yokai/`.
+On the result screen press **Edit** (right) for *Clone*, *Change ID* (3-char base-36 ID, e.g. `M88` =
+Jibanyan; see
 [YOKAI_IDS.md](https://github.com/mar1mo-41414/switch-youkaiwatch4-medal/blob/main/docs/YOKAI_IDS.md))
 or *Write to blank NTAG*.
 Yo-kai Watch 4 accepts each UID only once, so clone a new UID (or write another tag) every time.
@@ -49,94 +53,55 @@ Yo-kai Watch 4 accepts each UID only once, so clone a new UID (or write another 
 
 > **⚠ A tag you write to cannot be fully restored**
 >
-> *Erase NTAG* puts the password, the protection and pages 4-39 back to factory, but
-> **page 3 (the NDEF Capability Container) cannot be restored**: the CC of an NTAG21x is
-> bitwise-OR on write, so bits that are once set can never be cleared.
+> *Erase NTAG* puts the password, the protection and the data back to factory, but the NDEF
+> management area cannot be reset — that is a property of the tag, not a limitation of this app.
+> So even after erasing, **phone NFC apps will treat the tag as read-only and cannot write NDEF to
+> it**. The Flipper and other tools that use low-level commands can still rewrite it freely.
 >
-> An ark's CC is `E1 11 12 0F`, and the trailing `0F` means "NDEF write access denied" to NFC
-> Forum readers. So even after erasing, **phone NFC apps will treat the tag as read-only and
-> cannot write NDEF to it**. The Flipper and other tools that use raw WRITE commands can still
-> rewrite it freely.
->
-> Don't write to a tag you plan to use as an ordinary NFC tag later. See
-> [Erasing a written tag](#erasing-a-written-tag) for details.
+> Don't write to a tag you plan to use as an ordinary NFC tag later. The reason is explained in
+> [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#戻せないもの) (Japanese).
 
-Pick a dump with *Write .nfc to blank NTAG* (or *Edit → Write to blank NTAG*) and hold a blank
-NTAG213, NTAG215 or NTAG216 against the Flipper.
+Pick a dump with *Write .nfc to blank NTAG* (or *Edit → Write to blank NTAG*) and hold the tag
+against the Flipper. On success the same dump is also saved to `SD:/nfc/yokai/`.
 
-A tag's UID cannot be changed, so the keys and the password are **recomputed from the UID of the tag
-you present** — the UID inside the chosen `.nfc` is not used. One `.nfc` therefore makes any number
-of tags, each with its own UID (so Yo-kai Watch 4 keeps accepting them).
+A tag's UID cannot be changed, so the password is **recomputed from the UID of the tag you present**
+— the UID inside the chosen `.nfc` is not used. One `.nfc` therefore makes any number of tags, each
+with its own UID (so Yo-kai Watch 4 keeps accepting them).
 
-Pages 3-39 (NDEF plus the protected data, re-encrypted for that tag), then PWD/PACK, then ACCESS and
-finally CFG0 with AUTH0 — the config page goes last, because AUTH0 locks every page above it,
-including the password. Afterwards the app re-authenticates with the password it wrote, checks PACK
-is `BE EF`, reads every page back and compares, and saves the same dump to `SD:/nfc/yokai/`.
-
-The config, PWD and PACK pages sit at different addresses per tag type, so each type gets its own
-(the protected data at pages 3-39 is the same everywhere):
-
-| Type | Pages | CFG0 | ACCESS | PWD | PACK | Dynamic lock |
-|---|---|---|---|---|---|---|
-| NTAG213 | 45 | 41 | 42 | 43 | 44 | 40 |
-| NTAG215 | 135 | 131 | 132 | 133 | 134 | 130 |
-| NTAG216 | 231 | 227 | 228 | 229 | 230 | 226 |
-
-- Needs a **blank tag** with no lock bits and no password. Any other type (NTAG210/212, Ultralight,
-  magic tags) is rejected with `Wrong tag type`.
+- Needs a **blank NTAG213, NTAG215 or NTAG216** with no lock bits and no password. Any other type
+  (NTAG210/212, Ultralight, magic tags) stops with `Wrong tag type`.
 - **NTAG215 is verified on real hardware**: an ark written to a blank NTAG215 was accepted by
   Yo-kai Watch 4 (Switch) as an ordinary ark, with nothing rejected. Real medals / arks are NTAG213,
-  but NTAG215 works just as well. NTAG216 has the same layout as NTAG215 so it should behave the
-  same, but it is untested (the result screen says so).
-- Pages 40+ stay blank on NTAG215/216 (on NTAG213 that is where the config pages live). The game
-  does read that range (it reads 0x00-0x2A), but the hardware test confirms it does not look at it.
-- Pages 0-2 (UID / BCC / static lock bytes) and the dynamic lock page are left alone, and `CFGLCK`
-  stays off, so the same tag can be rewritten as often as you like.
-- Page 3 (the NDEF CC) is bitwise-OR on write for some tags, so the app writes (and expects)
-  "current value OR dump value". A factory NTAG215 (CC `E1 10 3E 00`) keeps `0x3E` as its size byte;
-  neither the type detection (first byte `E1`) nor the game reads NDEF, so it does not matter.
-- The NXP signature of the blank tag is kept as is. Yo-kai Watch 4 never sends READ_SIG, so it is
-  not checked.
+  but NTAG215 works just as well. NTAG216 is untested (the result screen says so).
+- Nothing is locked, so **the same tag can be rewritten as often as you like**, including over a tag
+  this app wrote before. A tag with some other password stops with `Tag already has another password`.
+- After writing, the PACK is checked and every page is read back and compared. If something fails,
+  the screen says which page it stopped at.
 
 ### Erasing a written tag
 
-*Erase NTAG (back to blank)* asks for confirmation; press **Erase** (right) and hold the tag.
-Verified on real hardware with an NTAG215.
+*Erase NTAG (back to blank)* asks for confirmation; press **Erase** (right) and hold the tag. It is
+then usable as a plain NTAG again (verified on real hardware with an NTAG215).
 
-| Restored | Value |
+| | After erasing |
 |---|---|
-| Pages 4-39 | all zeros |
-| CFG0 | `04 00 00 FF` (AUTH0 = FF, no protection; `04` is the STRG_MOD_EN default) |
-| ACCESS | `00` (no PROT, no CFGLCK) |
-| PWD / PACK | `FF FF FF FF` / `00 00` (factory) |
+| Data | the written range is all zeros |
+| Password / protection | back to factory (unprotected) |
+| NDEF management area | **not restored** (the tag does not allow it) |
 
-The password is derived from the tag's UID, so **any tag written by this app unlocks itself** (the
-game is detected from page 3). A tag with some other password stops with
-`Password does not match this UID`.
+The password is derived from the tag's UID, so **any tag written by this app erases itself**. A tag
+with some other password stops with `Password does not match this UID`.
 
-Protection is removed first, so losing the tag mid-erase can never leave it wiped *and* locked
-(the reverse of the write order). Afterwards pages 4-39 and the config are read back and compared,
-and the factory password `FF FF FF FF` is used for one final PWD_AUTH check.
-
-- **Page 3 (the NDEF CC) cannot be restored.** The CC is bitwise-OR on write, so bits that are set
-  stay set. An ark's CC is `E1 11 12 0F`, and the trailing `0F` means "NDEF write access denied",
-  so **phone NFC apps will treat the tag as read-only**. The memory itself is still writable with
-  raw WRITE commands, so the Flipper and other low-level tools can rewrite it freely.
-- Because the CC stays, an erased tag still *looks* like an ark if you only read page 3. Detection
-  therefore also requires the NDEF area (page 4) to be present: an erased tag shows up as
-  `Not a medal/ark?` in the `.fap`, and the `.fal` declines it so the stock NFC app reads it as a
-  plain NTAG.
-- The game will not accept it: the password is back to factory, so PWD_AUTH no longer answers
-  `BE EF`, and the protected pages are zeros.
-- Lock bytes are never touched, so nothing is locked.
-- Only the written range (pages 4-39) is cleared; pages 40+ on NTAG215/216 are left as they were.
+- An erased tag reads as `Not a medal/ark?` in the `.fap`; the `.fal` declines it so the stock NFC
+  app reads it as a plain NTAG. The game no longer accepts it either.
 - **On a real medal / ark this also erases its NDEF URL, which is unique and cannot be restored.**
   Read a dump first if you want it back.
 
 ### yokai_medal_parser.fal (NFC app plugin)
 
 Apps → NFC → **Read**. The stock NFC app's own screen shows the UID, password and checksum, and the
-dump is saved where regular reads go (`SD:/nfc/`). Auto-detected; no clone/change-ID here (use the `.fap`).
+dump is saved where regular reads go (`SD:/nfc/`). Auto-detected; no clone, change-ID, write or erase
+here (use the `.fap`).
 
 ## Build
 
@@ -145,14 +110,12 @@ python3 -m venv .venv && .venv/bin/pip install ufbt
 .venv/bin/ufbt update --index-url=https://up.unleashedflip.com/directory.json
 
 .venv/bin/ufbt            # -> dist/yokai_medal.fap
-scripts/build_plugin.sh   # -> dist_plugin/yokai_medal_parser.fal (see below)
+scripts/build_plugin.sh   # -> dist_plugin/yokai_medal_parser.fal (takes a few minutes)
 ```
 
-`yokai_medal_parser.fal` can't be built with ufbt alone — NFC app plugins must be built inside a source
-tree that has the parent app's (`nfc`) `application.fam`. `scripts/build_plugin.sh` fetches the full
-Unleashed firmware source and builds it with the official `fbt` tool (a few minutes).
-
-How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (Japanese).
+`yokai_medal_parser.fal` can't be built with ufbt alone, so `scripts/build_plugin.sh` fetches the
+full Unleashed firmware source and builds it with the official `fbt` tool. It uses the latest
+Unleashed release by default (override with `UNLEASHED_REF`).
 
 ## Notes
 

@@ -36,7 +36,7 @@ jobs:
           files: ${{ steps.build.outputs.fap-artifacts }}
           body: |
             Built with Unleashed SDK: ${{ steps.build.outputs.suffix }}
-            - `yokai_medal.fap`: standalone app (read/dump/clone/change-ID/write-to-blank-tag). Put it in `apps/NFC/` on the SD card.
+            - `yokai_medal.fap`: standalone app (read/dump/clone/change-ID/write-to-blank-tag/erase). Put it in `apps/NFC/` on the SD card.
             - `yokai_medal_parser.fal`: read-only plugin for the stock NFC app (Apps → NFC → Read). Put it in `apps_data/nfc/plugins/`.
             Both files are built against the latest Unleashed release; the firmware version must match the SDK above.
 

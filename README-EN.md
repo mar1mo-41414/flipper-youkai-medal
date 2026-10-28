@@ -47,6 +47,20 @@ Yo-kai Watch 4 accepts each UID only once, so clone a new UID (or write another 
 
 ### Writing to a blank NTAG
 
+> **⚠ A tag you write to cannot be fully restored**
+>
+> *Erase NTAG* puts the password, the protection and pages 4-39 back to factory, but
+> **page 3 (the NDEF Capability Container) cannot be restored**: the CC of an NTAG21x is
+> bitwise-OR on write, so bits that are once set can never be cleared.
+>
+> An ark's CC is `E1 11 12 0F`, and the trailing `0F` means "NDEF write access denied" to NFC
+> Forum readers. So even after erasing, **phone NFC apps will treat the tag as read-only and
+> cannot write NDEF to it**. The Flipper and other tools that use raw WRITE commands can still
+> rewrite it freely.
+>
+> Don't write to a tag you plan to use as an ordinary NFC tag later. See
+> [Erasing a written tag](#erasing-a-written-tag) for details.
+
 Pick a dump with *Write .nfc to blank NTAG* (or *Edit → Write to blank NTAG*) and hold a blank
 NTAG213, NTAG215 or NTAG216 against the Flipper.
 

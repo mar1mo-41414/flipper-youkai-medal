@@ -65,6 +65,19 @@ Apps → NFC → **Yo-kai Medal Reader**
 
 ### 空の NTAG への書き込み
 
+> **⚠ 書き込んだタグは完全には元に戻せない**
+>
+> **Erase NTAG** でパスワード・保護・ページ 4〜39 は工場出荷の状態に戻せるが、
+> **ページ 3 (NDEF の Capability Container) だけは戻せない**。NTAG21x の CC は WRITE が
+> ビット OR で、一度立てたビットを落とせないため。
+>
+> アークの CC は `E1 11 12 0F` で、末尾の `0F` は NFC Forum 的に「NDEF 書き込み不可」を
+> 意味する。そのため消去後も、**スマホの NFC アプリからは読み取り専用のタグとして扱われ、
+> NDEF を書き込めない**。Flipper や生の WRITE コマンドを使うツールからは普通に書き換えられる。
+>
+> 普通の NFC タグとして使う予定があるタグには書き込まないこと。
+> 詳しくは [書き込んだタグを空に戻す (Erase)](#書き込んだタグを空に戻す-erase) を参照。
+
 **Write .nfc to blank NTAG** でダンプを選ぶか、結果画面の **Edit → Write to blank NTAG** を選び、
 空のタグをかざす。NTAG213 / NTAG215 / NTAG216 に対応している。
 

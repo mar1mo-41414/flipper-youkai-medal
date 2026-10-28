@@ -130,7 +130,7 @@ typedef struct {
 
     /* poller コールバック (NFC スレッド) で埋める */
     YmGame game;
-    bool detected; /* ページ 3 から種類を判別できたか */
+    bool detected; /* 種類が確定しているか (自動判別が成功した、または種類を固定して読んだ) */
     bool auth_tried;
     bool auth_ok;
     uint8_t pwd[4];
@@ -219,9 +219,12 @@ static NfcCommand poller_callback(NfcGenericEvent event, void* context) {
         size_t uid_len = 0;
         const uint8_t* uid = mf_ultralight_get_uid(d, &uid_len);
         if(app->mode == MenuReadYw3) {
+            /* 種類を固定して読むときは判別しない。利用者が指定した時点で確定している */
             app->game = YmGameYw3;
+            app->detected = true;
         } else if(app->mode == MenuReadYw4) {
             app->game = YmGameYw4;
+            app->detected = true;
         } else {
             MfUltralightPageReadCommandData rd;
             app->detected = mf_ultralight_poller_read_page(event.instance, 0, &rd) == MfUltralightErrorNone &&
@@ -955,7 +958,8 @@ static void show_result(App* app) {
         furi_string_cat_printf(
             s, "%s%s\n", app->source == SourceLoaded ? "Loaded: " : "", game_name(app->game));
     } else {
-        /* ページ 3 の CC か NDEF がメダル / アークの形をしていない (消去済みのタグなど) */
+        /* 自動判別で、ページ 3 の CC か ページ 27 の識別子が合わなかった (消去済みのタグなど)。
+         * 種類を固定して読んだときはここには来ない */
         furi_string_cat_printf(s, "Not a medal/ark?\n(tried as %s)\n", game_name(app->game));
     }
     furi_string_cat_str(s, "UID: ");
@@ -1163,7 +1167,7 @@ static void load_and_write(App* app) {
 static void show_about(App* app) {
     show_message(
         app,
-        "Yo-kai Medal Reader v1.6.1\n"
+        "Yo-kai Medal Reader v1.6.2\n"
         "Unlocks NTAG213 Yo-kai medals\n"
         "(Yo-kai Watch 3, 3DS) and\n"
         "Yo-kai arks (Yo-kai Watch 4,\n"

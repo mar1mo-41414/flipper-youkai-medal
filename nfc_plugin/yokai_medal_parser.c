@@ -41,16 +41,24 @@ static bool yokai_medal_game_from_page3(const uint8_t* p3, YmGame* out) {
     return false;
 }
 
-/* 消去済みのタグを弾くための、NDEF (ページ 4) が残っているかの確認。
- * ページ 3 の CC は WRITE がビット OR で元に戻せないため、.fap の Erase で消したタグにも
- * アークの CC がそのまま残り、ページ 3 だけでは消去済みと区別できない。
- * YW4 のアークは AUTH0 = 0x1C なのでページ 4 は認証なしで読める
- * (YW3 は AUTH0 = 6 なので、この確認は YW4 だけに使う)。 */
-static bool yokai_medal_page_has_data(const MfUltralightPage* page) {
+/* NDEF の先頭 (ページ 4) が空でないかの確認。verify() / read() で、消去しただけのタグを
+ * 早めに弾くのに使う (タグに触らず確実に判定できるのは parse() 側) */
+static bool yokai_medal_page_has_data_at_4(const MfUltralightPage* page) {
     for(size_t i = 0; i < MF_ULTRALIGHT_PAGE_SIZE; i++) {
         if(page->data[i]) return true;
     }
     return false;
+}
+
+/* ページ 27 (保護データの直前) にある識別子 `BA B0 ..` の確認。
+ * ページ 3 の CC は WRITE がビット OR で元に戻せないため、.fap の Erase で消したタグにも
+ * アークの CC が残り、ページ 3 だけでは本物と区別できない。消去すると ページ 4〜39 が 0 に
+ * なるのでそこも見ていたが、「非ゼロ」では消去後に別のデータを書いたタグを弾けない。
+ * そこで、消去で消えて他の用途ではまず現れない この識別子で判定する
+ * (後ろ 2 バイトは版かもしれないので見ない)。
+ * YW3 はこの位置が AUTH0 = 6 で保護されるため、この確認は YW4 だけに使う。 */
+static bool yokai_medal_is_ark_data_page(const MfUltralightPage* page27) {
+    return page27->data[0] == 0xBA && page27->data[1] == 0xB0;
 }
 
 static bool yokai_medal_verify(Nfc* nfc) {
@@ -67,10 +75,14 @@ static bool yokai_medal_verify(Nfc* nfc) {
         FURI_LOG_D(TAG, "Page 3 does not match YW3/YW4");
         return false;
     }
+    /* ここで見られるのは「NDEF が空でない」ことまで。ページ 27 の識別子を確かめたいが、
+     * READ は 4 ページ単位で、ページ 27 からだと保護領域にかかって NAK される可能性があり、
+     * 本物のアークの判定を壊しかねない。最終的な判定は parse() 側で行う
+     * (parse() は保存済みのダンプを見るので、ページ 27 を確実に読める) */
     if(game == YmGameYw4) {
         MfUltralightPage page4;
         if(mf_ultralight_poller_sync_read_page(nfc, 4, &page4) != MfUltralightErrorNone ||
-           !yokai_medal_page_has_data(&page4)) {
+           !yokai_medal_page_has_data_at_4(&page4)) {
             FURI_LOG_D(TAG, "NDEF area is empty (erased tag?)");
             return false;
         }
@@ -94,11 +106,12 @@ static bool yokai_medal_read(Nfc* nfc, NfcDevice* device) {
         YmGame game;
         if(!yokai_medal_game_from_page3(page3.data, &game)) break;
 
-        /* YW4 は NDEF も見て、消去済みのタグを弾く */
+        /* YW4 は NDEF が空でないことも見て、消去しただけのタグを弾く
+         * (消去後に別のデータを書いたタグは parse() 側で弾く) */
         if(game == YmGameYw4) {
             MfUltralightPage page4;
             if(mf_ultralight_poller_sync_read_page(nfc, 4, &page4) != MfUltralightErrorNone) break;
-            if(!yokai_medal_page_has_data(&page4)) break;
+            if(!yokai_medal_page_has_data_at_4(&page4)) break;
         }
 
         /* UID = ページ 0 の先頭 3 バイト + ページ 1 の 4 バイト (NXP の 7 バイト UID) */
@@ -143,7 +156,12 @@ static bool yokai_medal_parse(const NfcDevice* device, FuriString* parsed_data) 
         if(data->pages_read < 5) break;
         YmGame game;
         if(!yokai_medal_game_from_page3(data->page[3].data, &game)) break;
-        if(game == YmGameYw4 && !yokai_medal_page_has_data(&data->page[4])) break;
+        /* 表示するかどうかはここで決まる。消去済み / 消去後に別のデータを書いたタグは
+         * ページ 27 の識別子が無いので、標準の NTAG として表示させる */
+        if(game == YmGameYw4 &&
+           !(data->pages_read > 27 && yokai_medal_is_ark_data_page(&data->page[27]))) {
+            break;
+        }
 
         uint8_t uid[YM_UID_LEN];
         uid[0] = data->page[0].data[0];

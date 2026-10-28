@@ -173,18 +173,19 @@ static bool game_from_page3(const uint8_t* p3, YmGame* out) {
     return false;
 }
 
-/* 消去済みのタグを弾くための、NDEF (ページ 4 以降) が残っているかの確認。
- * ページ 3 の CC は WRITE がビット OR で元に戻せないため、消去してもアークの CC がそのまま
- * 残り、ページ 3 だけでは消去済みと区別できない。
- * YW4 のアークは AUTH0 = 0x1C なので、ページ 4〜7 は認証なしで読める
- * (YW3 は AUTH0 = 6 で ページ 6 以降が保護されるため、この確認は YW4 だけに使う)。 */
-static bool pages_have_data(const MfUltralightPage* pages, size_t count) {
-    for(size_t p = 0; p < count; p++) {
-        for(size_t i = 0; i < MF_ULTRALIGHT_PAGE_SIZE; i++) {
-            if(pages[p].data[i]) return true;
-        }
-    }
-    return false;
+/* ページ 27 (保護データの直前) にある識別子 `BA B0 ..` の確認。
+ * ページ 3 の CC は WRITE がビット OR で元に戻せないため、消去してもアークの CC が残り、
+ * ページ 3 だけでは本物と区別できない。消去すると ページ 4〜39 が 0 になるのでそこも見ていたが、
+ * 「非ゼロ」では消去後に別のデータを書いたタグを弾けない (CC が残っているので素通りする)。
+ * そこで、消去で消えて他の用途ではまず現れない この識別子で判定する。
+ * 後ろ 2 バイト (`01 01`) は版かもしれないので見ない。
+ *
+ * ページ 24〜27 は AUTH0 = 0x1C の範囲外なので認証なしで読める。READ は 4 ページ単位なので、
+ * ページ 27 からではなく 24 から読んで 4 ページ目を見る (27 からだと保護領域にかかる)。
+ * YW3 は AUTH0 = 6 でこの位置が保護されるため、この確認は YW4 だけに使う。
+ * YW3 の CC (`F5 10 ..`) は NDEF の形ではないので、普通のタグと取り違える心配は無い。 */
+static bool is_ark_data_page(const uint8_t* p27) {
+    return p27[0] == 0xBA && p27[1] == 0xB0;
 }
 
 /* ---------- NFC ---------- */
@@ -225,12 +226,12 @@ static NfcCommand poller_callback(NfcGenericEvent event, void* context) {
             MfUltralightPageReadCommandData rd;
             app->detected = mf_ultralight_poller_read_page(event.instance, 0, &rd) == MfUltralightErrorNone &&
                             game_from_page3(rd.page[3].data, &app->game);
-            /* YW4 は NDEF も見て、消去済みのタグを弾く */
+            /* YW4 は ページ 27 の識別子も見て、消去済みのタグを弾く */
             if(app->detected && app->game == YmGameYw4) {
                 MfUltralightPageReadCommandData nd;
                 app->detected =
-                    mf_ultralight_poller_read_page(event.instance, 4, &nd) == MfUltralightErrorNone &&
-                    pages_have_data(nd.page, 4);
+                    mf_ultralight_poller_read_page(event.instance, 24, &nd) == MfUltralightErrorNone &&
+                    is_ark_data_page(nd.page[3].data);
             }
             if(!app->detected) app->game = YmGameYw4;
         }
@@ -1125,7 +1126,8 @@ static bool load_file(App* app) {
     mf_ultralight_copy(
         app->data, (const MfUltralightData*)nfc_device_get_data(app->device, NfcProtocolMfUltralight));
     app->detected = game_from_page3(app->data->page[3].data, &app->game) &&
-                    (app->game == YmGameYw3 || pages_have_data(&app->data->page[4], 4));
+                    (app->game == YmGameYw3 ||
+                     (app->data->pages_read > 27 && is_ark_data_page(app->data->page[27].data)));
     if(!app->detected) app->game = YmGameYw4;
     size_t uid_len = 0;
     const uint8_t* uid = mf_ultralight_get_uid(app->data, &uid_len);
@@ -1161,7 +1163,7 @@ static void load_and_write(App* app) {
 static void show_about(App* app) {
     show_message(
         app,
-        "Yo-kai Medal Reader v1.6\n"
+        "Yo-kai Medal Reader v1.6.1\n"
         "Unlocks NTAG213 Yo-kai medals\n"
         "(Yo-kai Watch 3, 3DS) and\n"
         "Yo-kai arks (Yo-kai Watch 4,\n"

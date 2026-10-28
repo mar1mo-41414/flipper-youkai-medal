@@ -113,7 +113,8 @@ The password is derived from the tag's UID, so **any tag written by this app era
 with some other password stops with `Password does not match this UID`.
 
 - An erased tag reads as `Not a medal/ark?` in the `.fap`; the `.fal` declines it so the stock NFC
-  app reads it as a plain NTAG. The game no longer accepts it either.
+  app reads it as a plain NTAG. The same holds once you write other data to it. The game no longer
+  accepts it either.
 - **On a real medal / ark this also erases its NDEF URL, which is unique and cannot be restored.**
   Read a dump first if you want it back.
 

@@ -1,7 +1,7 @@
 /* Yo-kai Medal Reader: 妖怪ウォッチ3 (3DS) の妖怪メダル / 妖怪ウォッチ4 (Switch) の妖怪アークを
  * UID から算出したパスワードでアンロックし、全ページを .nfc に保存する。
  * 読んだ (または読み込んだ) ダンプから、UID や種別 ID を変えた複製も作れる。
- * 作った複製は、空の NTAG213 に書き込んで実物のメダル / アークにできる
+ * 作った複製は、空の NTAG (213/215/216) に書き込んで実物のメダル / アークにできる
  * (タグの UID は変えられないので、かざしたタグの UID で鍵・パスワードを作り直してから書く)。 */
 
 #include <furi.h>
@@ -83,7 +83,7 @@ typedef enum {
     WriteNone, /* まだ試していない */
     WriteOk,
     WriteNoTag, /* 途中でタグが離れた */
-    WriteBadType, /* ダンプと種類が違うタグ (空の NTAG213 が必要) */
+    WriteBadType, /* NTAG213/215/216 以外のタグ */
     WriteBadUid, /* UID が 7 バイトでない */
     WriteLocked, /* ロックビットが立っていて書けない */
     WriteProtected, /* 既に別のパスワードがかかっている */
@@ -273,7 +273,7 @@ static void start_write(App* app) {
     memset(app->wr_uid, 0, sizeof(app->wr_uid));
     memset(app->wr_pack, 0, sizeof(app->wr_pack));
 
-    start_poller(app, "Hold blank NTAG213", "to Flipper's back\nand keep it still");
+    start_poller(app, "Hold blank NTAG", "to Flipper's back\nand keep it still");
 }
 
 static void stop_read(App* app) {
@@ -737,10 +737,10 @@ static void show_write_result(App* app) {
                 yw4_id(app, id);
                 furi_string_cat_printf(s, "\nNo.%.4s  ID %s", (const char*)app->plain, id);
             }
-            /* 実物のメダル / アークは NTAG213。他の種類でもタグとしては成立するが、
-               ゲームが受け付けるかは未確認 */
-            if(app->wr_tag_type != MfUltralightTypeNTAG213) {
-                furi_string_cat_str(s, "\n! not NTAG213:\n  untested with the game");
+            /* NTAG213 (実物と同じ) と NTAG215 (実機のゲームで読み込めるのを確認済み) は警告なし。
+               NTAG216 はページ構成が NTAG215 と同じなので動くはずだが未検証 */
+            if(app->wr_tag_type == MfUltralightTypeNTAG216) {
+                furi_string_cat_str(s, "\n(NTAG216: untested\n in the game)");
             }
         }
     }
@@ -832,7 +832,8 @@ static void show_about(App* app) {
         "- Change ID (YW4): new ark\n"
         "  type (3-char base36 ID,\n"
         "  e.g. M88), new random UID\n"
-        "- Write to blank NTAG213:\n"
+        "- Write to blank NTAG213/\n"
+        "  215/216:\n"
         "  re-encrypts for the real\n"
         "  tag UID, then writes the\n"
         "  pages, PWD/PACK and\n"

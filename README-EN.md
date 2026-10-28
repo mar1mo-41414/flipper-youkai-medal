@@ -69,11 +69,12 @@ The config, PWD and PACK pages sit at different addresses per tag type, so each 
 
 - Needs a **blank tag** with no lock bits and no password. Any other type (NTAG210/212, Ultralight,
   magic tags) is rejected with `Wrong tag type`.
-- **Real medals / arks are NTAG213.** Writing to an NTAG215 is verified on real hardware (write →
-  read-back compare → read and decrypt again with the stock NFC app plus the `.fal`), but whether
-  **the game accepts an NTAG215/216 ark is not verified yet** — the result screen says
-  `! not NTAG213: untested with the game`. Pages 40+ stay blank on those types (on NTAG213 that is
-  where the config pages live).
+- **NTAG215 is verified on real hardware**: an ark written to a blank NTAG215 was accepted by
+  Yo-kai Watch 4 (Switch) as an ordinary ark, with nothing rejected. Real medals / arks are NTAG213,
+  but NTAG215 works just as well. NTAG216 has the same layout as NTAG215 so it should behave the
+  same, but it is untested (the result screen says so).
+- Pages 40+ stay blank on NTAG215/216 (on NTAG213 that is where the config pages live). The game
+  does read that range (it reads 0x00-0x2A), but the hardware test confirms it does not look at it.
 - Pages 0-2 (UID / BCC / static lock bytes) and the dynamic lock page are left alone, and `CFGLCK`
   stays off, so the same tag can be rewritten as often as you like.
 - Page 3 (the NDEF CC) is bitwise-OR on write for some tags, so the app writes (and expects)

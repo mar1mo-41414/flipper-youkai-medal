@@ -65,8 +65,9 @@ from the UID, so the whole dump can be assembled from scratch.
   genuine signature remains.
 - The NDEF URL is synthesized as `https://www.ywg.jp/<ID>`. A real token has an unknown string after
   the ID, but the game does not read the URL.
-- **Not verified with the game yet.** Arks derived from a real dump are verified on hardware; one
-  built entirely from scratch has not been tested.
+- **Verified on real hardware**: an ark built from scratch was accepted by Yo-kai Watch 4 (Switch)
+  both when emulated from a Flipper Zero and when written onto a blank NTAG. The zero signature and
+  the synthesized NDEF URL make no difference.
 
 ### Writing to a blank NTAG
 

@@ -94,6 +94,7 @@ typedef enum {
     WriteAuthFailed, /* 書き込んだ PWD で認証できなかった */
     WritePackBad, /* PACK が BE EF にならなかった */
     WriteVerifyFailed, /* 読み戻した内容が合わない */
+    WriteRetryAuth, /* 内部用: 認証の順番を変えてやり直す (画面には出ない) */
 } WriteStatus;
 
 typedef struct {
@@ -134,6 +135,7 @@ typedef struct {
     uint8_t wr_pack[2];
     const char* wr_type; /* かざされたタグの種類の名前 (静的な文字列) */
     MfUltralightType wr_tag_type;
+    bool wr_retry; /* 認証の順番を変えて 2 回目を試している */
 
     /* 解析結果 */
     bool valid; /* 復号してチェックサムが合った (= 複製の元にできる) */
@@ -274,23 +276,31 @@ static void start_read(App* app) {
         app->mode == MenuReadAuto ? "to Flipper's back\n(auto detect)" : "to Flipper's back");
 }
 
-static void reset_tag_op(App* app, Operation op) {
-    app->op = op;
+/* wr_retry は保ったまま poller を開始する (認証の順番を変えたやり直し用) */
+static void start_tag_op(App* app) {
     app->wr_status = WriteNone;
     app->wr_page = 0;
     app->wr_type = NULL;
     memset(app->wr_uid, 0, sizeof(app->wr_uid));
     memset(app->wr_pack, 0, sizeof(app->wr_pack));
+
+    if(app->op == OpErase) {
+        start_poller(app, "Hold tag to erase", "to Flipper's back\n(data is cleared)");
+    } else {
+        start_poller(app, "Hold blank NTAG", "to Flipper's back\nand keep it still");
+    }
 }
 
 static void start_write(App* app) {
-    reset_tag_op(app, OpWrite);
-    start_poller(app, "Hold blank NTAG", "to Flipper's back\nand keep it still");
+    app->op = OpWrite;
+    app->wr_retry = false;
+    start_tag_op(app);
 }
 
 static void start_erase(App* app) {
-    reset_tag_op(app, OpErase);
-    start_poller(app, "Hold tag to erase", "to Flipper's back\n(data is cleared)");
+    app->op = OpErase;
+    app->wr_retry = false;
+    start_tag_op(app);
 }
 
 static void stop_read(App* app) {
@@ -556,27 +566,42 @@ static bool prepare_tag_op(
         if(!app->detected) app->game = YmGameYw4;
     }
 
-    /* 設定ページを読む。読めない (読み出しも保護されている) か、既に保護範囲が PWD / PACK の
-     * ページまで来ているなら、この UID から計算した PWD で解除を試す
-     * (このアプリで書いたタグなら通る。市販の別用途のタグなら通らない) */
-    MfUltralightPageReadCommandData rd;
-    MfUltralightError err = mf_ultralight_poller_read_page(poller, pages->lock, &rd);
-    /* rd.page[1] = 設定ページ 1 (MIRROR, RFUI, MIRROR_PAGE, AUTH0) */
-    if(err != MfUltralightErrorNone || rd.page[1].data[3] <= pages->pwd + 1) {
+    /* PWD_AUTH は活性化してから最初に送らないと通らない。保護されたページを READ すると
+     * タグが NAK を返して IDLE 状態に戻り、以降のコマンドに応答しなくなるため
+     * (読み取りが動くのは、poller が活性化直後に PWD_AUTH を送っているから)。
+     * ページ 0〜3 は AUTH0 (YW3 は 6、YW4 は 0x1C) の範囲外なので、保護されていても読める。
+     *
+     * 保護されているかどうかは設定ページを読まないと分からず、その設定ページ自体が保護対象。
+     * なので「認証してから読む」か「読んでから (必要なら) 認証する」かを、その処理で
+     * ありふれた方に賭けて決める。外れたら 1 回だけ逆の順でやり直す (wr_retry)。
+     *   消去   … 対象はこのアプリで書いた (= 保護された) タグなので、先に認証
+     *   書き込み … 対象は空のタグなので、認証せずに読む */
+    bool auth_first = (app->op == OpErase) != app->wr_retry;
+    if(auth_first) {
         YmKeys k;
         ym_derive(app->game, uid, &k);
         MfUltralightPollerAuthContext auth = {0};
         memcpy(auth.password.data, k.pwd, 4);
         if(mf_ultralight_poller_auth_pwd(poller, &auth) != MfUltralightErrorNone) {
-            app->wr_status = WriteProtected;
+            /* 保護されていないタグだった (または別のパスワード)。認証なしでやり直す */
+            app->wr_status = app->wr_retry ? WriteProtected : WriteRetryAuth;
             return false;
         }
         memcpy(app->wr_pack, auth.pack.data, 2);
         *authed = true;
-        err = mf_ultralight_poller_read_page(poller, pages->lock, &rd);
     }
-    if(err != MfUltralightErrorNone) {
-        app->wr_status = WriteNoTag;
+
+    /* 設定ページ (動的ロックバイト / CFG0 / ACCESS) を読む */
+    MfUltralightPageReadCommandData rd;
+    if(mf_ultralight_poller_read_page(poller, pages->lock, &rd) != MfUltralightErrorNone) {
+        /* 読み出しも保護されている。認証ありでやり直す */
+        app->wr_status = (auth_first || app->wr_retry) ? WriteProtected : WriteRetryAuth;
+        return false;
+    }
+    /* 保護範囲が PWD / PACK のページまで来ているなら、書くには認証が必要 */
+    /* rd.page[1] = CFG0 (MIRROR, RFUI, MIRROR_PAGE, AUTH0) */
+    if(!*authed && rd.page[1].data[3] <= pages->pwd + 1) {
+        app->wr_status = app->wr_retry ? WriteProtected : WriteRetryAuth;
         return false;
     }
     /* 動的ロックバイトが立っていると、ページ 16 以降が書けない */
@@ -1005,7 +1030,7 @@ static void load_and_write(App* app) {
 static void show_about(App* app) {
     show_message(
         app,
-        "Yo-kai Medal Reader v1.5\n"
+        "Yo-kai Medal Reader v1.5.1\n"
         "Unlocks NTAG213 Yo-kai medals\n"
         "(Yo-kai Watch 3, 3DS) and\n"
         "Yo-kai arks (Yo-kai Watch 4,\n"
@@ -1139,6 +1164,12 @@ static bool custom_event_callback(void* context, uint32_t event) {
         return true;
     case EventTagDone:
         stop_read(app);
+        /* 認証の順番の読みが外れた。poller を作り直して逆の順でもう一度 (1 回だけ) */
+        if(app->wr_status == WriteRetryAuth) {
+            app->wr_retry = true;
+            start_tag_op(app);
+            return true;
+        }
         show_tag_result(app);
         return true;
     case EventEdit:

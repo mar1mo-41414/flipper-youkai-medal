@@ -23,6 +23,7 @@ Distributed as two files.
 - **Clone**: rebuilds a read (or saved) dump with a new random UID (`.fap` only)
 - **Change ID**: turns a Yo-kai Watch 4 ark into another ark type (another Yo-kai) (`.fap` only)
 - **Write**: writes a saved `.nfc` onto a blank NTAG213/215/216, turning it into a real medal / ark (`.fap` only)
+- **Erase**: puts a written tag back to blank so it can be used as a plain NTAG again (`.fap` only)
 
 ## Install
 
@@ -37,8 +38,8 @@ Both depend on the firmware API version: use a build that matches your Unleashed
 
 ### yokai_medal.fap (standalone app)
 
-Apps → NFC → **Yo-kai Medal Reader**, then *Read (auto detect)*, a fixed game, *Load .nfc file* or
-*Write .nfc to blank NTAG*. Dumps are saved to `SD:/nfc/yokai/`. On the result screen press **Edit**
+Apps → NFC → **Yo-kai Medal Reader**, then *Read (auto detect)*, a fixed game, *Load .nfc file*,
+*Write .nfc to blank NTAG* or *Erase NTAG (back to blank)*. Dumps are saved to `SD:/nfc/yokai/`. On the result screen press **Edit**
 (right) for *Clone*, *Change ID* (3-char base-36 ID, e.g. `M88` = Jibanyan; see
 [YOKAI_IDS.md](https://github.com/mar1mo-41414/switch-youkaiwatch4-medal/blob/main/docs/YOKAI_IDS.md))
 or *Write to blank NTAG*.
@@ -82,6 +83,34 @@ The config, PWD and PACK pages sit at different addresses per tag type, so each 
   neither the type detection (first byte `E1`) nor the game reads NDEF, so it does not matter.
 - The NXP signature of the blank tag is kept as is. Yo-kai Watch 4 never sends READ_SIG, so it is
   not checked.
+
+### Erasing a written tag
+
+*Erase NTAG (back to blank)* asks for confirmation; press **Erase** (right) and hold the tag.
+
+| Restored | Value |
+|---|---|
+| Pages 4-39 | all zeros |
+| CFG0 | `04 00 00 FF` (AUTH0 = FF, no protection; `04` is the STRG_MOD_EN default) |
+| ACCESS | `00` (no PROT, no CFGLCK) |
+| PWD / PACK | `FF FF FF FF` / `00 00` (factory) |
+
+The password is derived from the tag's UID, so **any tag written by this app unlocks itself** (the
+game is detected from page 3). A tag with some other password stops with
+`Password does not match this UID`.
+
+Protection is removed first, so losing the tag mid-erase can never leave it wiped *and* locked
+(the reverse of the write order). Afterwards pages 4-39 and the config are read back and compared,
+and the factory password `FF FF FF FF` is used for one final PWD_AUTH check.
+
+- **Page 3 (the NDEF CC) cannot be restored.** The CC is bitwise-OR on write, so bits that are set
+  stay set. An ark's CC is `E1 11 12 0F`, and the trailing `0F` means "NDEF write access denied",
+  so **phone NFC apps will treat the tag as read-only**. The memory itself is still writable with
+  raw WRITE commands, so the Flipper and other low-level tools can rewrite it freely.
+- Lock bytes are never touched, so nothing is locked.
+- Only the written range (pages 4-39) is cleared; pages 40+ on NTAG215/216 are left as they were.
+- **On a real medal / ark this also erases its NDEF URL, which is unique and cannot be restored.**
+  Read a dump first if you want it back.
 
 ### yokai_medal_parser.fal (NFC app plugin)
 

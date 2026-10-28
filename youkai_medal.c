@@ -50,6 +50,7 @@ typedef enum {
     MenuReadYw4,
     MenuLoad,
     MenuWrite,
+    MenuErase,
     MenuAbout,
 } MenuItem;
 
@@ -61,8 +62,9 @@ typedef enum {
 
 typedef enum {
     EventReadDone = 100,
-    EventWriteDone,
+    EventTagDone, /* 書き込み / 消去が終わった */
     EventEdit,
+    EventEraseConfirmed,
     EventIdEntered,
 } CustomEvent;
 
@@ -76,9 +78,10 @@ typedef enum {
 typedef enum {
     OpRead,
     OpWrite,
+    OpErase,
 } Operation;
 
-/* 書き込みの結果 */
+/* 書き込み / 消去の結果 (どちらも同じ手順を踏むので共用) */
 typedef enum {
     WriteNone, /* まだ試していない */
     WriteOk,
@@ -160,6 +163,7 @@ static bool game_from_page3(const uint8_t* p3, YmGame* out) {
 
 /* 「ダンプの解析・保存・複製」の後ろで定義 (複製と同じ再暗号化を使う) */
 static void write_to_tag(App* app, MfUltralightPoller* poller);
+static void erase_tag(App* app, MfUltralightPoller* poller);
 
 static NfcCommand poller_callback(NfcGenericEvent event, void* context) {
     App* app = context;
@@ -171,11 +175,15 @@ static NfcCommand poller_callback(NfcGenericEvent event, void* context) {
         ev->data->poller_mode = MfUltralightPollerModeRead;
         break;
     case MfUltralightPollerEventTypeAuthRequest: {
-        /* 書き込みはここで全部やる (poller が読み取りを始める前の、タグが起きている状態) */
-        if(app->op == OpWrite) {
+        /* 書き込み / 消去はここで全部やる (poller が読み取りを始める前の、タグが起きている状態) */
+        if(app->op != OpRead) {
             ev->data->auth_context.skip_auth = true;
-            write_to_tag(app, event.instance);
-            view_dispatcher_send_custom_event(app->vd, EventWriteDone);
+            if(app->op == OpWrite) {
+                write_to_tag(app, event.instance);
+            } else {
+                erase_tag(app, event.instance);
+            }
+            view_dispatcher_send_custom_event(app->vd, EventTagDone);
             return NfcCommandStop;
         }
         const MfUltralightData* d = (const MfUltralightData*)nfc_poller_get_data(app->poller);
@@ -212,19 +220,20 @@ static NfcCommand poller_callback(NfcGenericEvent event, void* context) {
         break;
     case MfUltralightPollerEventTypeReadFailed:
         /* 認証まで進んでいない = タグが無い (または途中で離れた)。結果を出さずに検出からやり直す */
-        if(app->op == OpWrite || !app->auth_tried) {
+        if(app->op != OpRead || !app->auth_tried) {
             app->detected = false;
             app->auth_ok = false;
             return NfcCommandReset;
         }
         /* fall through */
     case MfUltralightPollerEventTypeReadSuccess:
-        /* 書き込みのつもりで AuthRequest が来ないまま読み終わった = パスワードに対応しないタグ */
-        if(app->op == OpWrite) {
+        /* 書き込み / 消去のつもりで AuthRequest が来ないまま読み終わった
+         * = パスワード認証に対応しないタグ */
+        if(app->op != OpRead) {
             const MfUltralightData* d = (const MfUltralightData*)nfc_poller_get_data(app->poller);
             app->wr_type = mf_ultralight_get_device_name(d, NfcDeviceNameTypeShort);
             app->wr_status = WriteBadType;
-            view_dispatcher_send_custom_event(app->vd, EventWriteDone);
+            view_dispatcher_send_custom_event(app->vd, EventTagDone);
             return NfcCommandStop;
         }
         mf_ultralight_copy(app->data, (const MfUltralightData*)nfc_poller_get_data(app->poller));
@@ -265,15 +274,23 @@ static void start_read(App* app) {
         app->mode == MenuReadAuto ? "to Flipper's back\n(auto detect)" : "to Flipper's back");
 }
 
-static void start_write(App* app) {
-    app->op = OpWrite;
+static void reset_tag_op(App* app, Operation op) {
+    app->op = op;
     app->wr_status = WriteNone;
     app->wr_page = 0;
     app->wr_type = NULL;
     memset(app->wr_uid, 0, sizeof(app->wr_uid));
     memset(app->wr_pack, 0, sizeof(app->wr_pack));
+}
 
+static void start_write(App* app) {
+    reset_tag_op(app, OpWrite);
     start_poller(app, "Hold blank NTAG", "to Flipper's back\nand keep it still");
+}
+
+static void start_erase(App* app) {
+    reset_tag_op(app, OpErase);
+    start_poller(app, "Hold tag to erase", "to Flipper's back\n(data is cleared)");
 }
 
 static void stop_read(App* app) {
@@ -467,87 +484,130 @@ static void build_write_data(App* app, const MfUltralightData* tag, const MfUltr
     cfg->access.cfglck = false;
 }
 
-static bool write_one_page(App* app, MfUltralightPoller* poller, uint8_t page) {
-    if(mf_ultralight_poller_write_page(poller, page, &app->out->page[page]) ==
-       MfUltralightErrorNone) {
+/* タグの種類ごとのページ番号 */
+typedef struct {
+    uint16_t cfg; /* 設定ページ 1 (MIRROR / AUTH0)。+1 が ACCESS */
+    uint8_t pwd; /* PWD。+1 が PACK */
+    uint8_t lock; /* 動的ロックバイト */
+} TagPages;
+
+static bool write_raw_page(
+    App* app,
+    MfUltralightPoller* poller,
+    uint16_t page,
+    const uint8_t data[MF_ULTRALIGHT_PAGE_SIZE]) {
+    MfUltralightPage pg;
+    memcpy(pg.data, data, MF_ULTRALIGHT_PAGE_SIZE);
+    if(mf_ultralight_poller_write_page(poller, (uint8_t)page, &pg) == MfUltralightErrorNone) {
         return true;
     }
     app->wr_status = WriteFailed;
-    app->wr_page = page;
+    app->wr_page = (uint8_t)page;
     return false;
+}
+
+static bool write_one_page(App* app, MfUltralightPoller* poller, uint16_t page) {
+    return write_raw_page(app, poller, page, app->out->page[page].data);
+}
+
+/* 書き込みと消去の共通の下準備。種類と UID を確認し、ロックビットを見て、
+ * 保護されていれば UID から計算した PWD で解除する。
+ * head にはページ 0〜3 が入る (消去では種類の判別にも使う)。
+ * detect_game = true なら、ページ 3 から YW3/YW4 を判別してから PWD を計算する。 */
+static bool prepare_tag_op(
+    App* app,
+    MfUltralightPoller* poller,
+    const MfUltralightData* tag,
+    bool detect_game,
+    MfUltralightPageReadCommandData* head,
+    TagPages* pages,
+    bool* authed) {
+    app->wr_type = mf_ultralight_get_device_name(tag, NfcDeviceNameTypeShort);
+    app->wr_tag_type = tag->type;
+    *authed = false;
+
+    if(!writable_tag_type(tag->type)) {
+        app->wr_status = WriteBadType;
+        return false;
+    }
+    size_t uid_len = 0;
+    const uint8_t* uid = mf_ultralight_get_uid(tag, &uid_len);
+    if(uid_len != YM_UID_LEN) {
+        app->wr_status = WriteBadUid;
+        return false;
+    }
+    memcpy(app->wr_uid, uid, YM_UID_LEN);
+
+    pages->cfg = mf_ultralight_get_config_page_num(tag->type);
+    pages->pwd = mf_ultralight_get_pwd_page_num(tag->type);
+    pages->lock = (uint8_t)(pages->cfg - 1);
+
+    /* ページ 0〜3 を読む。静的ロックバイト (ページ 2 の 3・4 バイト目) を確認する */
+    if(mf_ultralight_poller_read_page(poller, 0, head) != MfUltralightErrorNone) {
+        app->wr_status = WriteNoTag;
+        return false;
+    }
+    if(head->page[2].data[2] || head->page[2].data[3]) {
+        app->wr_status = WriteLocked;
+        return false;
+    }
+    if(detect_game) {
+        app->detected = game_from_page3(head->page[3].data, &app->game);
+        if(!app->detected) app->game = YmGameYw4;
+    }
+
+    /* 設定ページを読む。読めない (読み出しも保護されている) か、既に保護範囲が PWD / PACK の
+     * ページまで来ているなら、この UID から計算した PWD で解除を試す
+     * (このアプリで書いたタグなら通る。市販の別用途のタグなら通らない) */
+    MfUltralightPageReadCommandData rd;
+    MfUltralightError err = mf_ultralight_poller_read_page(poller, pages->lock, &rd);
+    /* rd.page[1] = 設定ページ 1 (MIRROR, RFUI, MIRROR_PAGE, AUTH0) */
+    if(err != MfUltralightErrorNone || rd.page[1].data[3] <= pages->pwd + 1) {
+        YmKeys k;
+        ym_derive(app->game, uid, &k);
+        MfUltralightPollerAuthContext auth = {0};
+        memcpy(auth.password.data, k.pwd, 4);
+        if(mf_ultralight_poller_auth_pwd(poller, &auth) != MfUltralightErrorNone) {
+            app->wr_status = WriteProtected;
+            return false;
+        }
+        memcpy(app->wr_pack, auth.pack.data, 2);
+        *authed = true;
+        err = mf_ultralight_poller_read_page(poller, pages->lock, &rd);
+    }
+    if(err != MfUltralightErrorNone) {
+        app->wr_status = WriteNoTag;
+        return false;
+    }
+    /* 動的ロックバイトが立っていると、ページ 16 以降が書けない */
+    if(rd.page[0].data[0] || rd.page[0].data[1]) {
+        app->wr_status = WriteLocked;
+        return false;
+    }
+    return true;
 }
 
 /* かざされたタグに app->plain の内容を書き込む。NFC スレッド (AuthRequest) から呼ばれる。
  * 結果は app->wr_* に入れる。 */
 static void write_to_tag(App* app, MfUltralightPoller* poller) {
     const MfUltralightData* tag = (const MfUltralightData*)nfc_poller_get_data(app->poller);
-    app->wr_type = mf_ultralight_get_device_name(tag, NfcDeviceNameTypeShort);
-    app->wr_tag_type = tag->type;
 
-    /* 1. 種類と UID */
-    if(!writable_tag_type(tag->type)) {
-        app->wr_status = WriteBadType;
-        return;
-    }
-    size_t uid_len = 0;
-    const uint8_t* uid = mf_ultralight_get_uid(tag, &uid_len);
-    if(uid_len != YM_UID_LEN) {
-        app->wr_status = WriteBadUid;
-        return;
-    }
-    memcpy(app->wr_uid, uid, YM_UID_LEN);
-
-    uint16_t cfg_page = mf_ultralight_get_config_page_num(tag->type);
-    uint8_t pwd_page = mf_ultralight_get_pwd_page_num(tag->type);
-    uint8_t lock_page = (uint8_t)(cfg_page - 1); /* 動的ロックバイト */
+    /* 1. 種類・UID・ロックビットの確認と、必要なら保護の解除 */
+    MfUltralightPageReadCommandData head;
+    MfUltralightPageReadCommandData rd;
+    TagPages pg;
+    bool authed = false;
+    /* 種類は元ダンプから分かっているので、ここでは判別しない */
+    if(!prepare_tag_op(app, poller, tag, false, &head, &pg, &authed)) return;
+    uint16_t cfg_page = pg.cfg;
+    uint8_t pwd_page = pg.pwd;
+    uint8_t lock_page = pg.lock;
     uint8_t last_page = write_last_page(app);
 
-    /* 2. ページ 0〜3 を読む。静的ロックバイト (ページ 2 の 3・4 バイト目) を確認し、
-     *    ページ 0〜3 の今の値は書き込む内容の土台にする */
-    MfUltralightPageReadCommandData head;
-    if(mf_ultralight_poller_read_page(poller, 0, &head) != MfUltralightErrorNone) {
-        app->wr_status = WriteNoTag;
-        return;
-    }
-    if(head.page[2].data[2] || head.page[2].data[3]) {
-        app->wr_status = WriteLocked;
-        return;
-    }
-    MfUltralightPageReadCommandData rd;
-
-    /* 3. 設定ページを読む。読めない (読み出しも保護されている) か、既に保護範囲が書き込む
-     *    ページまで来ているなら、この UID から計算した PWD で解除を試す
-     *    (このアプリで書いたタグなら通る。市販の別用途のタグなら通らない) */
-    YmKeys k;
-    ym_derive(app->game, uid, &k);
-    MfUltralightError err = mf_ultralight_poller_read_page(poller, lock_page, &rd);
-    bool authed = false;
-    /* rd.page[1] = 設定ページ 1 (MIRROR, RFUI, MIRROR_PAGE, AUTH0) */
-    if(err != MfUltralightErrorNone || rd.page[1].data[3] <= pwd_page + 1) {
-        MfUltralightPollerAuthContext auth = {0};
-        memcpy(auth.password.data, k.pwd, 4);
-        if(mf_ultralight_poller_auth_pwd(poller, &auth) != MfUltralightErrorNone) {
-            app->wr_status = WriteProtected;
-            return;
-        }
-        memcpy(app->wr_pack, auth.pack.data, 2);
-        authed = true;
-        err = mf_ultralight_poller_read_page(poller, lock_page, &rd);
-    }
-    if(err != MfUltralightErrorNone) {
-        app->wr_status = WriteNoTag;
-        return;
-    }
-    /* 動的ロックバイトが立っていると、ページ 16 以降が書けない */
-    if(rd.page[0].data[0] || rd.page[0].data[1]) {
-        app->wr_status = WriteLocked;
-        return;
-    }
-
-    /* 4. このタグ向けの中身を作る (UID で再暗号化、設定はこのタグの位置に) */
+    /* 2. このタグ向けの中身を作る (UID で再暗号化、設定はこのタグの位置に) */
     build_write_data(app, tag, head.page);
 
-    /* 5. 書き込む。AUTH0 (設定ページ 1) を最後にするのが肝心で、先に書くと
+    /* 3. 書き込む。AUTH0 (設定ページ 1) を最後にするのが肝心で、先に書くと
      *    それ以降のページが保護されて PWD も設定も書けなくなる */
     for(uint8_t p = WRITE_FIRST_PAGE; p <= last_page; p++) {
         if(!write_one_page(app, poller, p)) return;
@@ -557,7 +617,7 @@ static void write_to_tag(App* app, MfUltralightPoller* poller) {
     if(!write_one_page(app, poller, cfg_page + 1)) return; /* ACCESS (PROT) */
     if(!write_one_page(app, poller, cfg_page)) return; /* AUTH0 */
 
-    /* 6. 書いた PWD で認証して PACK を確認する (3. で解除済みなら同じパスワードなので省略) */
+    /* 4. 書いた PWD で認証して PACK を確認する (1. で解除済みなら同じパスワードなので省略) */
     if(!authed) {
         MfUltralightPollerAuthContext auth = {0};
         memcpy(auth.password.data, app->pwd, 4);
@@ -572,7 +632,7 @@ static void write_to_tag(App* app, MfUltralightPoller* poller) {
         return;
     }
 
-    /* 7. 読み戻して照合する (READ は 4 ページずつ返る) */
+    /* 5. 読み戻して照合する (READ は 4 ページずつ返る) */
     for(uint8_t p = WRITE_FIRST_PAGE; p <= last_page; p += 4) {
         if(mf_ultralight_poller_read_page(poller, p, &rd) != MfUltralightErrorNone) {
             app->wr_status = WriteVerifyFailed;
@@ -601,11 +661,125 @@ static void write_to_tag(App* app, MfUltralightPoller* poller) {
     app->wr_status = WriteOk;
 }
 
+/* ---------- 書き込んだタグの消去 ---------- */
+
+/* NTAG21x の工場出荷値 (データシートの初期値)。
+ * CFG0 = 04 00 00 FF
+ *   04 = STRG_MOD_EN (強変調モード。データシートの初期値は 1)。ミラー機能は無効、
+ *        AUTH0 = FF で保護なし。実物のアークの CFG0 が 04 00 00 1C で、
+ *        メーカーが AUTH0 だけ変えていたことからも 04 が初期値と分かる
+ * CFG1 = 00 05 00 00
+ *   ACCESS = 0 (PROT・CFGLCK なし、AUTHLIM 0)、VCTID = 05。
+ *   VCTID は VCSL コマンドが返すだけの値で、動作には影響しない */
+static const uint8_t NTAG_BLANK_CFG0[4] = {0x04, 0x00, 0x00, 0xFF};
+static const uint8_t NTAG_BLANK_CFG1[4] = {0x00, 0x05, 0x00, 0x00};
+static const uint8_t NTAG_BLANK_PWD[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+static const uint8_t NTAG_BLANK_PAGE[4] = {0x00, 0x00, 0x00, 0x00};
+
+/* 書き込んだタグを、普通の NTAG として使える状態に戻す。
+ * NFC スレッド (AuthRequest) から呼ばれる。結果は app->wr_* に入れる。
+ *
+ * ページ 3 (NDEF の CC) だけは戻せない。NTAG21x の CC は WRITE がビット OR で、
+ * 立てたビットを落とせないため (アークの CC は E1 11 12 0F で、下位ニブルの 0F が
+ * 「NDEF 書き込み不可」を意味する)。メモリ自体は生の WRITE で書けるので、
+ * Flipper や生コマンドを使うツールからは普通に書き換えられる。 */
+static void erase_tag(App* app, MfUltralightPoller* poller) {
+    const MfUltralightData* tag = (const MfUltralightData*)nfc_poller_get_data(app->poller);
+
+    /* 1. 種類・UID・ロックビットの確認と、保護の解除。
+     *    PWD は UID から計算するので、ページ 3 で YW3/YW4 を判別する必要がある */
+    MfUltralightPageReadCommandData head;
+    MfUltralightPageReadCommandData rd;
+    TagPages pg;
+    bool authed = false;
+    if(!prepare_tag_op(app, poller, tag, true, &head, &pg, &authed)) return;
+    uint8_t last_page = WRITE_LAST_PAGE; /* 書き込んだ範囲 (3〜39) だけを消す */
+
+    /* 2. 先に保護を外す。こうすると以降は認証なしで書けるので、途中でタグが離れても
+     *    保護がかかったままにならない (書き込みとは逆の順番) */
+    if(!write_raw_page(app, poller, pg.cfg, NTAG_BLANK_CFG0)) return; /* AUTH0 = FF */
+    if(!write_raw_page(app, poller, pg.cfg + 1, NTAG_BLANK_CFG1)) return; /* ACCESS = 0 */
+
+    /* 3. PWD / PACK を工場出荷値に戻す */
+    if(!write_raw_page(app, poller, pg.pwd, NTAG_BLANK_PWD)) return;
+    if(!write_raw_page(app, poller, pg.pwd + 1, NTAG_BLANK_PAGE)) return;
+
+    /* 4. ユーザーメモリを 0 で埋める (ページ 3 の CC は戻せないので触らない) */
+    for(uint8_t p = WRITE_FIRST_PAGE + 1; p <= last_page; p++) {
+        if(!write_raw_page(app, poller, p, NTAG_BLANK_PAGE)) return;
+    }
+
+    /* 5. 読み戻して照合する */
+    for(uint8_t p = WRITE_FIRST_PAGE + 1; p <= last_page; p += 4) {
+        if(mf_ultralight_poller_read_page(poller, p, &rd) != MfUltralightErrorNone) {
+            app->wr_status = WriteVerifyFailed;
+            app->wr_page = p;
+            return;
+        }
+        for(uint8_t i = 0; i < 4 && p + i <= last_page; i++) {
+            if(memcmp(rd.page[i].data, NTAG_BLANK_PAGE, MF_ULTRALIGHT_PAGE_SIZE) != 0) {
+                app->wr_status = WriteVerifyFailed;
+                app->wr_page = (uint8_t)(p + i);
+                return;
+            }
+        }
+    }
+    if(mf_ultralight_poller_read_page(poller, pg.lock, &rd) != MfUltralightErrorNone ||
+       memcmp(rd.page[1].data, NTAG_BLANK_CFG0, MF_ULTRALIGHT_PAGE_SIZE) != 0 ||
+       rd.page[2].data[0] != NTAG_BLANK_CFG1[0]) {
+        app->wr_status = WriteVerifyFailed;
+        app->wr_page = (uint8_t)pg.cfg;
+        return;
+    }
+
+    /* 6. PWD は読み出せない (常に 0 が返る) ので、工場出荷の FF FF FF FF で
+     *    認証できることで確認する。保護は既に外してあるので、ここで失敗しても
+     *    タグは使える状態 */
+    MfUltralightPollerAuthContext auth = {0};
+    memcpy(auth.password.data, NTAG_BLANK_PWD, 4);
+    if(mf_ultralight_poller_auth_pwd(poller, &auth) != MfUltralightErrorNone) {
+        app->wr_status = WriteAuthFailed;
+        return;
+    }
+    memcpy(app->wr_pack, auth.pack.data, 2);
+
+    app->wr_status = WriteOk;
+}
+
 static void button_callback(GuiButtonType result, InputType type, void* context) {
     App* app = context;
     if(result == GuiButtonTypeRight && type == InputTypeShort) {
         view_dispatcher_send_custom_event(app->vd, EventEdit);
     }
+}
+
+static void erase_button_callback(GuiButtonType result, InputType type, void* context) {
+    App* app = context;
+    if(result == GuiButtonTypeRight && type == InputTypeShort) {
+        view_dispatcher_send_custom_event(app->vd, EventEraseConfirmed);
+    }
+}
+
+/* 消去は実物のメダル / アークを壊しうる (NDEF の URL は固有で、消すと戻せない) ので確認する */
+static void confirm_erase(App* app) {
+    widget_reset(app->result);
+    widget_add_text_scroll_element(
+        app->result,
+        0,
+        0,
+        128,
+        52,
+        "Erase NTAG\n"
+        "Clears pages 4-39, removes\n"
+        "the password and puts the\n"
+        "config back to factory.\n"
+        "A real medal/ark loses its\n"
+        "NDEF URL for good - read it\n"
+        "first if you want it back.\n"
+        "Back = cancel");
+    widget_add_button_element(
+        app->result, GuiButtonTypeRight, "Erase", erase_button_callback, app);
+    switch_view(app, ViewResult);
 }
 
 static void show_message(App* app, const char* text) {
@@ -680,11 +854,12 @@ static void show_result(App* app) {
     switch_view(app, ViewResult);
 }
 
-/* 書き込みの結果を表示する。成功していれば、実際に書いた内容を .nfc にも保存する */
-static void show_write_result(App* app) {
+/* 書き込み / 消去の結果を表示する。書き込みが成功していれば、書いた内容を .nfc にも保存する */
+static void show_tag_result(App* app) {
+    bool erase = app->op == OpErase;
     FuriString* s = app->text;
     furi_string_reset(s);
-    furi_string_cat_str(s, "Write to blank NTAG\n");
+    furi_string_cat_str(s, erase ? "Erase NTAG\n" : "Write to blank NTAG\n");
 
     bool ok = app->wr_status == WriteOk;
     switch(app->wr_status) {
@@ -705,13 +880,18 @@ static void show_write_result(App* app) {
         break;
     case WriteProtected:
         furi_string_cat_str(
-            s, "Tag already has another\npassword. Unlock it first\nor use a blank tag.");
+            s,
+            erase ? "Password does not match\nthis UID. Not a tag\nwritten by this app?" :
+                    "Tag already has another\npassword. Unlock it first\nor use a blank tag.");
         break;
     case WriteFailed:
         furi_string_cat_printf(s, "WRITE rejected\nat page %u", app->wr_page);
         break;
     case WriteAuthFailed:
-        furi_string_cat_str(s, "PWD_AUTH failed after\nwriting the password");
+        furi_string_cat_str(
+            s,
+            erase ? "Cleared, but PWD_AUTH\nwith FF FF FF FF failed" :
+                    "PWD_AUTH failed after\nwriting the password");
         break;
     case WritePackBad:
         furi_string_cat_printf(s, "PACK: %02X %02X (want BE EF)", app->wr_pack[0], app->wr_pack[1]);
@@ -728,24 +908,31 @@ static void show_write_result(App* app) {
         furi_string_cat_printf(
             s, "\n%s %s\nUID: ", app->wr_type ? app->wr_type : "?", game_name(app->game));
         append_hex(s, app->wr_uid, YM_UID_LEN);
-        if(ok) {
-            furi_string_cat_str(s, "\nPWD: ");
-            append_hex(s, app->pwd, 4);
-            furi_string_cat_printf(s, "\nPACK: %02X %02X", app->wr_pack[0], app->wr_pack[1]);
-            if(app->game == YmGameYw4) {
-                char id[4];
-                yw4_id(app, id);
-                furi_string_cat_printf(s, "\nNo.%.4s  ID %s", (const char*)app->plain, id);
-            }
-            /* NTAG213 (実物と同じ) と NTAG215 (実機のゲームで読み込めるのを確認済み) は警告なし。
-               NTAG216 はページ構成が NTAG215 と同じなので動くはずだが未検証 */
-            if(app->wr_tag_type == MfUltralightTypeNTAG216) {
-                furi_string_cat_str(s, "\n(NTAG216: untested\n in the game)");
-            }
-        }
     }
 
-    if(ok) {
+    if(ok && erase) {
+        furi_string_cat_printf(
+            s,
+            "\nPages %u-%u cleared\n"
+            "Password removed\n"
+            "PWD/PACK back to factory\n"
+            "Page 3 (NDEF CC) cannot\nbe restored: its bits are\nwrite-once",
+            WRITE_FIRST_PAGE + 1,
+            WRITE_LAST_PAGE);
+    } else if(ok) {
+        furi_string_cat_str(s, "\nPWD: ");
+        append_hex(s, app->pwd, 4);
+        furi_string_cat_printf(s, "\nPACK: %02X %02X", app->wr_pack[0], app->wr_pack[1]);
+        if(app->game == YmGameYw4) {
+            char id[4];
+            yw4_id(app, id);
+            furi_string_cat_printf(s, "\nNo.%.4s  ID %s", (const char*)app->plain, id);
+        }
+        /* NTAG213 (実物と同じ) と NTAG215 (実機のゲームで読み込めるのを確認済み) は警告なし。
+           NTAG216 はページ構成が NTAG215 と同じなので動くはずだが未検証 */
+        if(app->wr_tag_type == MfUltralightTypeNTAG216) {
+            furi_string_cat_str(s, "\n(NTAG216: untested\n in the game)");
+        }
         /* 書いた内容と同じダンプを保存しておく (エミュレートや再書き込みに使える) */
         app->source = SourceCreated;
         bool saved = save_dump(app);
@@ -757,10 +944,13 @@ static void show_write_result(App* app) {
     }
     notification_message(app->notif, ok ? &sequence_success : &sequence_error);
 
+    bool button = ok && !erase; /* 続けて次のタグに書く / 複製を作れるように Edit を残す */
     widget_reset(app->result);
-    widget_add_text_scroll_element(app->result, 0, 0, 128, ok ? 52 : 64, furi_string_get_cstr(s));
-    /* 続けて次のタグに書く / 複製を作れるように Edit を残す */
-    if(ok) widget_add_button_element(app->result, GuiButtonTypeRight, "Edit", button_callback, app);
+    widget_add_text_scroll_element(
+        app->result, 0, 0, 128, button ? 52 : 64, furi_string_get_cstr(s));
+    if(button) {
+        widget_add_button_element(app->result, GuiButtonTypeRight, "Edit", button_callback, app);
+    }
     switch_view(app, ViewResult);
 }
 
@@ -815,7 +1005,7 @@ static void load_and_write(App* app) {
 static void show_about(App* app) {
     show_message(
         app,
-        "Yo-kai Medal Reader v1.4\n"
+        "Yo-kai Medal Reader v1.5\n"
         "Unlocks NTAG213 Yo-kai medals\n"
         "(Yo-kai Watch 3, 3DS) and\n"
         "Yo-kai arks (Yo-kai Watch 4,\n"
@@ -840,7 +1030,16 @@ static void show_about(App* app) {
         "  AUTH0/ACCESS (CFGLCK is\n"
         "  left off, so the tag can\n"
         "  be rewritten later)\n"
-        "YW4 accepts each UID once.");
+        "YW4 accepts each UID once.\n"
+        "\n"
+        "Erase NTAG: clears pages\n"
+        "4-39, removes the password\n"
+        "and puts PWD/PACK and the\n"
+        "config back to factory, so\n"
+        "the tag works as a plain\n"
+        "NTAG again. Page 3 (NDEF\n"
+        "CC) cannot be restored:\n"
+        "its bits are write-once.");
 }
 
 /* ---------- UI ---------- */
@@ -857,6 +1056,9 @@ static void menu_callback(void* context, uint32_t index) {
         break;
     case MenuWrite:
         load_and_write(app);
+        break;
+    case MenuErase:
+        confirm_erase(app);
         break;
     default:
         app->source = SourceRead;
@@ -935,12 +1137,15 @@ static bool custom_event_callback(void* context, uint32_t event) {
         stop_read(app);
         show_result(app);
         return true;
-    case EventWriteDone:
+    case EventTagDone:
         stop_read(app);
-        show_write_result(app);
+        show_tag_result(app);
         return true;
     case EventEdit:
         show_edit_menu(app);
+        return true;
+    case EventEraseConfirmed:
+        start_erase(app);
         return true;
     case EventIdEntered:
         if(apply_id(app)) {
@@ -1003,6 +1208,7 @@ static App* app_alloc(void) {
     submenu_add_item(app->menu, "Read YW4 ark (Switch)", MenuReadYw4, menu_callback, app);
     submenu_add_item(app->menu, "Load .nfc file", MenuLoad, menu_callback, app);
     submenu_add_item(app->menu, "Write .nfc to blank NTAG", MenuWrite, menu_callback, app);
+    submenu_add_item(app->menu, "Erase NTAG (back to blank)", MenuErase, menu_callback, app);
     submenu_add_item(app->menu, "About", MenuAbout, menu_callback, app);
     view_dispatcher_add_view(app->vd, ViewMenu, submenu_get_view(app->menu));
 
